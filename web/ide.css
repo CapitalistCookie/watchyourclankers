@@ -60,34 +60,66 @@
 .ide .ide-gutter::after { background: var(--border-c); opacity: .55; }
 .ide .ide-gutter:hover::after,
 .ide .ide-gutter.dragging::after { background: var(--accent); opacity: 1; }
-/* a gutter adjacent to a COLLAPSED region is inert: no hairline, no drag cursor,
- * no pointer events (its track is still 6px so placement stays stable). */
+/* a gutter adjacent to a COLLAPSED region is inert AND folded: its grid track is
+ * set to 0 by JS (zero-waste — no leftover 6px gap), so we also collapse the
+ * gutter element's own 6px box to 0 and kill the hairline / drag cursor / pointer
+ * events. (Without the size override the flex-none 6px child would overflow the
+ * 0-width track and overlap the neighbour.) */
 .ide .ide-gutter.inert { cursor: default; pointer-events: none; }
 .ide .ide-gutter.inert::after { opacity: 0; }
+.ide .ide-gutter-col.inert { width: 0; }
+.ide .ide-gutter-row.inert { height: 0; }
 
 /* ============================================================ collapsed regions (FEATURE A)
- * JS toggles .tree-collapsed / .editor-collapsed / .terminal-collapsed on .ide and
- * shrinks the matching grid track to a header strip. Here we hide each region's
- * BODY so only the header (with its chevron) shows in the shrunken track.
- *
- * Tree collapses to a thin vertical RAIL (col == TREE_COLLAPSED_PX): hide the body
- * + the header's label/count, tighten the header padding, and center the chevron so
- * the rail reads as a clickable spine. */
+ * ZERO-WASTE COLLAPSE. JS toggles .tree-collapsed / .editor-collapsed /
+ * .terminal-collapsed on .ide and shrinks the matching grid track to a SLIM RIB
+ * (~10px), folding the adjacent gutter track to 0. A collapsed tree/terminal hands
+ * back (nearly) ALL its space: we hide BOTH its header and body and show only the
+ * relocated rib (.ide-rib) carrying the ▸ expand chevron, so the strip is a thin
+ * clickable spine, not a fat empty band. The editor is the flex middle and keeps
+ * its tab+meta strip when collapsed (a usable 56px, not a rib). */
+
+/* Tree collapses to a slim vertical RIB (col == TREE_COLLAPSED_PX ~10px): hide the
+ * whole header + body; the rib (shown below) is the entire visible column. */
+.ide.tree-collapsed .ide-tree .ide-hdr,
 .ide.tree-collapsed .ide-tree .ide-body { display: none; }
-.ide.tree-collapsed .ide-tree .ide-hdr {
-  padding: 7px 0; justify-content: center; gap: 0;
-}
-.ide.tree-collapsed .ide-tree .ide-hdr .accent,
-.ide.tree-collapsed .ide-tree .ide-hdr .count { display: none; }
-.ide.tree-collapsed .ide-tree .ide-chevron { margin: 0; }
 
 /* Editor collapses to its tab+meta strip (row == EDITOR_COLLAPSED_PX): hide the
- * editor surface (CM / fallback / empty), keep the tabbar + meta bar visible. */
+ * editor surface (CM / fallback / empty), keep the tabbar + meta bar visible. The
+ * editor never ribs (it keeps a real, clickable header), so its rib stays hidden. */
 .ide.editor-collapsed .ide-editor .editor-wrap { display: none; }
 
-/* Terminal collapses to its header strip (row == TERM_COLLAPSED_PX): hide the feed
- * body, keep the header + its chevron + the cmd-count. */
+/* Terminal collapses to a slim horizontal RIB (row == TERM_COLLAPSED_PX ~10px):
+ * hide the whole header + feed body; the rib is the entire visible row. */
+.ide.terminal-collapsed .ide-terminal .ide-hdr,
 .ide.terminal-collapsed .ide-terminal .ide-body { display: none; }
+
+/* ---- relocated expand RIB (zero-waste). Each collapsible region carries an
+ * .ide-rib button (hidden while expanded) that fills the slim collapsed track and
+ * holds the ▸ expand chevron. It only shows for the region that is collapsed, so
+ * the expand affordance stays obvious + clickable without wasting a header band. */
+.ide-rib {
+  display: none;
+  flex: 1 1 auto;
+  align-items: center; justify-content: center;
+  margin: 0; padding: 0;
+  background: var(--bg-panel);
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  transition: color .12s ease, background .12s ease;
+}
+.ide-rib:hover { color: var(--accent); background: var(--bg-surface); }
+.ide-rib .ide-rib-chevron { font-size: 11px; line-height: 1; }
+/* vertical rib (tree): a full-height clickable spine; the ▸ chevron (centered)
+ * reads as "expand". A subtle right border ties it to the editor edge. */
+.ide-rib-x { flex-direction: column; border-right: 1px solid var(--border-c); }
+/* horizontal rib (terminal): a full-width clickable spine along the collapsed row */
+.ide-rib-y { width: 100%; border-top: 1px solid var(--border-c); }
+/* reveal each rib only when its own region is collapsed */
+.ide.tree-collapsed .ide-tree .ide-rib-x { display: flex; }
+.ide.terminal-collapsed .ide-terminal .ide-rib-y { display: flex; }
 
 /* shared little section header */
 .ide-hdr {

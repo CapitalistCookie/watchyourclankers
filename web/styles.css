@@ -75,7 +75,7 @@
   --display: 'Instrument Serif', Georgia, 'Times New Roman', serif;
 
   --row-h: 22px;
-  --hdr-h: 46px;
+  --hdr-h: 36px;   /* single consolidated top bar (brand · controls · status) */
 }
 
 * { box-sizing: border-box; }
@@ -119,27 +119,38 @@ body { overflow: hidden; }
   background: var(--bg-void);
 }
 
-/* ----------------------------------------------------------------- header / brand */
+/* ----------------------------------------------------------------- header / brand
+ * ONE consolidated top bar: brand · controls (#wyc-toolbar, where mosaic.js mounts
+ * its control row) · live-status. Shrunk to ~36px, all items vertically centred. */
 .wyc-header {
   height: var(--hdr-h);
   flex: 0 0 auto;
-  display: flex; align-items: center; gap: 16px;
-  padding: 0 18px;
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 14px;
   background: var(--bg-deep);
   border-bottom: 2px solid var(--accent);   /* the terracotta brand rule */
   user-select: none;
 }
 .wyc-brand {
+  flex: 0 0 auto;
   font-family: var(--display);
-  font-size: 26px;
+  font-size: 1rem;          /* ~16px — compact brand, still Instrument Serif */
   line-height: 1;
   letter-spacing: 0.2px;
   color: var(--cream);
   display: inline-flex; align-items: baseline;
+  white-space: nowrap;
 }
 .wyc-brand .watch    { color: var(--cream); }
 .wyc-brand .clankers { color: var(--cream); opacity: .92; }
-.wyc-spacer { flex: 1 1 auto; }
+
+/* the controls slot — mosaic.js renders its .mos-bar here; it flex-grows so the
+ * controls sit left, then .wyc-spacer pushes metric + status to the far right. */
+.wyc-toolbar {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center;
+}
+.wyc-spacer { flex: 0 0 auto; }
 
 .wyc-metric {
   font-family: var(--mono);
@@ -338,7 +349,7 @@ body { overflow: hidden; }
     grid-template-areas: "sessions" "ticker" "terminal";
   }
   .scur { display: none; }
-  .wyc-brand { font-size: 22px; }
+  .wyc-brand { font-size: 0.95rem; }
   .wyc-metric { display: none; }
 }
 

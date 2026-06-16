@@ -53,6 +53,16 @@ function header() {
   brand.className = 'wyc-brand';
   brand.innerHTML = '<span class="watch">watch</span><span class="clankers">yourclankers</span>';
 
+  // Controls slot. mountMosaic renders its single-row controls (watch-count
+  // dropdown, auto-switch chip, redaction chip, rail/settings/palette icons)
+  // INTO this element so the brand row and the old mosaic control bar collapse
+  // into ONE top bar: brand · controls · live-status.
+  const toolbar = document.createElement('div');
+  toolbar.className = 'wyc-toolbar';
+  toolbar.id = 'wyc-toolbar';
+
+  // pushes the live-status indicator to the far right; the toolbar itself
+  // flex-grows so controls sit left-of-centre after the brand.
   const spacer = document.createElement('div');
   spacer.className = 'wyc-spacer';
 
@@ -71,7 +81,7 @@ function header() {
   label.textContent = STATUS_TEXT.connecting;
   conn.append(dot, label);
 
-  hdr.append(brand, spacer, metric, conn);
+  hdr.append(brand, toolbar, spacer, metric, conn);
   return { hdr, conn, label, metric };
 }
 

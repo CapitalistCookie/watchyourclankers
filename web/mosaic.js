@@ -37,29 +37,54 @@ import mountMenu from './menu.js';
 import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js';
 
 // persisted pane-size store key (separate from menu.js's settings blob). Holds
-// per-layout grid track sizes + the rail width + the chosen "vert" layout.
+// per-grid track sizes + the rail width + the chosen watch-count (watchN).
 const LAYOUT_KEY = 'wyc.mosaic.layout.v1';
 // every track clamps to this fraction of the grid so none can collapse to 0.
 const TRACK_MIN_FRAC = 0.12;
 const RAIL_MIN = 140, RAIL_MAX = 420;
-// columns × rows per layout id (drives gutter placement + portrait swap).
-// 'vert' is the portrait stack (1 column, N rows that fill the height).
-const GRID_DIMS = {
-  1: { cols: 1, rows: 1 },
-  2: { cols: 2, rows: 1 },
-  4: { cols: 2, rows: 2 },
-  6: { cols: 3, rows: 2 },
-  vert: { cols: 1, rows: 4 },
-};
-// portrait remap: when the viewport is taller than wide, a landscape layout
-// re-orients so tiles stack into more rows than columns.
-const PORTRAIT_DIMS = {
-  1: { cols: 1, rows: 1 },
-  2: { cols: 1, rows: 2 },
-  4: { cols: 2, rows: 2 },
-  6: { cols: 2, rows: 3 },
-  vert: { cols: 1, rows: 4 },
-};
+
+// ---- watch-count → grid arrangement -----------------------------------------
+// The watch dropdown chooses HOW MANY sessions to tile (1..MAX_WATCH) or 'auto'
+// (fit as many as comfortably display). Orientation is INDEPENDENT of count and
+// AUTO-DETECTED (portrait → stack into more rows, landscape → more columns).
+const MIN_WATCH = 1, MAX_WATCH = 8;
+const WATCH_AUTO = 'auto';
+// in 'auto' mode, the max tiles we'll show without getting cramped (per orient).
+const AUTO_MAX_LANDSCAPE = 6, AUTO_MAX_PORTRAIT = 4;
+
+/**
+ * Arrange N tiles into a near-square grid, biased to more COLUMNS in landscape
+ * and more ROWS in portrait. Handles ARBITRARY N (not just powers of two):
+ * sensible specials — n=3 landscape→3×1, n=3 portrait→1×3, n=5→3×2 (one empty),
+ * n=7→4×2 (one empty), etc. cols*rows is always ≥ n (the slack cell stays empty).
+ * @param {number} n      tile count (clamped to ≥1)
+ * @param {boolean} portrait  viewport taller than wide
+ * @returns {{cols:number, rows:number}}
+ */
+export function tilesToGrid(n, portrait) {
+  n = Math.max(1, Math.floor(n) || 1);
+  if (n === 1) return { cols: 1, rows: 1 };
+  if (n === 2) return portrait ? { cols: 1, rows: 2 } : { cols: 2, rows: 1 };
+  if (n === 3) return portrait ? { cols: 1, rows: 3 } : { cols: 3, rows: 1 };
+  // Search every column count 1..n for the (cols, rows=ceil(n/cols)) pair that
+  // best balances FULLNESS (few empty cells) and SQUARENESS (small |cols-rows|).
+  // The weighting (empties*5 + skew*2) is tuned so a near-square with a partial
+  // empty row beats an elongated strip (n=5 → 3×2, not 5×1) while a fuller layout
+  // still wins over an emptier squarer one where it matters (n=7 → 4×2, not 3×3).
+  // Yields: 2×2 (n=4), 3×2 (n=5,6), 4×2 (n=7,8). Orientation bias applied after.
+  let best = null;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const empties = cols * rows - n;
+    const skew = Math.abs(cols - rows);
+    const score = empties * 5 + skew * 2;
+    if (!best || score < best.score) best = { cols, rows, score };
+  }
+  let { cols, rows } = best;
+  // orientation bias: portrait wants the longer side as ROWS, landscape as COLS.
+  if (portrait ? cols > rows : rows > cols) { const t = cols; cols = rows; rows = t; }
+  return { cols, rows };
+}
 
 // lazily-loaded ide.js mount fn (or null if unavailable)
 let _ideMod = undefined; // undefined = not tried, null = unavailable, fn = loaded
@@ -133,22 +158,30 @@ export function mountMosaic(rootEl, store) {
   mobileNav.append(mnPrev, mnLabel, mnNext);
 
   // --- control bar (desktop) ---
+  // Rendered into the shared header toolbar slot (#wyc-toolbar) so the brand row
+  // and these controls live on ONE top bar. Falls back to mounting in the mosaic
+  // root if the slot is absent (e.g. tests / standalone mount).
   const bar = el('div', 'mos-bar');
-  const layoutSeg = el('div', 'mos-seg');
-  const layoutBtns = {};
-  for (const ly of [1, 2, 4, 6]) {
-    const b = el('button', null, ly + '-up');
-    b.title = `layout: ${ly} tiles`;
-    b.addEventListener('click', () => setLayout(ly));
-    layoutSeg.append(b); layoutBtns[ly] = b;
-  }
-  // vertical-monitor layout: a single column of stacked rows for a portrait screen.
+
+  // watch-count dropdown: "Watch [N|Auto]". Replaces the old 1/2/4/6/vert
+  // segmented buttons — arbitrary N, orientation auto-detected (no vert entry).
+  const watchWrap = el('label', 'mos-watch');
+  watchWrap.append(el('span', 'mos-watch-lbl', 'Watch'));
+  const watchSel = /** @type {HTMLSelectElement} */ (el('select', 'mos-watch-sel'));
+  watchSel.title = 'how many sessions to tile (Auto fits as many as comfortably display)';
   {
-    const b = el('button', 'mos-vert-btn', '▯ vert');
-    b.title = 'layout: vertical (portrait monitor) — stacked column';
-    b.addEventListener('click', () => setLayout('vert'));
-    layoutSeg.append(b); layoutBtns.vert = b;
+    const optAuto = /** @type {HTMLOptionElement} */ (el('option', null, 'Auto'));
+    optAuto.value = WATCH_AUTO;
+    watchSel.append(optAuto);
+    for (let n = MIN_WATCH; n <= MAX_WATCH; n++) {
+      const o = /** @type {HTMLOptionElement} */ (el('option', null, String(n)));
+      o.value = String(n);
+      watchSel.append(o);
+    }
   }
+  watchSel.addEventListener('change', () => setWatch(watchSel.value));
+  watchWrap.append(watchSel);
+
   const modeChip = el('div', 'mos-mode');
   modeChip.append(document.createTextNode('auto-switch '), el('b', null, ''));
   modeChip.style.cursor = 'pointer';
@@ -166,7 +199,7 @@ export function mountMosaic(rootEl, store) {
   const paletteBtn = el('button', 'mos-iconbtn', '⌘K');
   paletteBtn.title = 'command palette (⌘K)';
   paletteBtn.addEventListener('click', () => menu.open());
-  bar.append(layoutSeg, modeChip, barSpacer, redactionChip, railToggle, settingsBtn, paletteBtn);
+  bar.append(watchWrap, modeChip, barSpacer, redactionChip, railToggle, settingsBtn, paletteBtn);
 
   // --- stage: grid + (rail gutter) + rail ---
   const stage = el('div', 'mos-stage');
@@ -207,7 +240,20 @@ export function mountMosaic(rootEl, store) {
   fabPop.addEventListener('click', () => popOutFocused());
   fabRaw.addEventListener('click', () => toggleRaw());
 
-  root.append(mobileNav, bar, stage, fab);
+  // ONE-BAR consolidation: render the desktop control bar into the shared header
+  // toolbar slot (created by app.js) so brand · controls · live-status sit on a
+  // single top bar. If the slot is missing (standalone mount), keep the legacy
+  // behaviour and place the bar at the top of the mosaic root.
+  const toolbarSlot = (typeof document !== 'undefined')
+    ? document.getElementById('wyc-toolbar') : null;
+  if (toolbarSlot) {
+    toolbarSlot.innerHTML = '';
+    bar.classList.add('mos-bar-in-header');
+    toolbarSlot.append(bar);
+    root.append(mobileNav, stage, fab);
+  } else {
+    root.append(mobileNav, bar, stage, fab);
+  }
   rootEl.append(root);
 
   // ================================================================ tile model
@@ -244,23 +290,63 @@ export function mountMosaic(rootEl, store) {
 
   // ================================================================ pane sizing
   // Persisted layout sizes (separate localStorage blob, NOT menu.js settings):
-  //   { vertLayout?: true, railW?: number, layout1:{cols,rows}, layout2:{...}, ... }
-  // cols/rows are arrays of fr weights (one per track) for that layout's CURRENT
-  // orientation key. Restored on mount, re-applied whenever the grid re-gutters.
-  /** @type {{vertLayout?:boolean, railW?:number, [k:string]:any}} */
+  //   { watchN?: number|'auto', railW?: number, grid2x2:{cols,rows}, grid3x2:{...}, ... }
+  // cols/rows are arrays of fr weights (one per track) keyed by the CURRENT grid
+  // dims signature. Restored on mount, re-applied whenever the grid re-gutters.
+  /** @type {{watchN?:number|string, railW?:number, [k:string]:any}} */
   let sizes = loadSizes(LAYOUT_KEY) || {};
   let railCollapsed = !!sizes.railCollapsed; // rail collapsed shut (gutter or chevron); persisted
   /** @type {HTMLElement[]} */
   let trackGutters = [];         // gutters currently overlaid on the grid
   let lastGutterKey = '';        // dims+orientation signature the gutters were built for
 
-  // The mosaic's own "vertical layout" choice lives here (menu.js can't store a
-  // non-numeric layout). When set, it overrides menu.effLayout().
-  function vertChosen() { return !!sizes.vertLayout; }
-  function setVertChosen(on) {
-    if (!!sizes.vertLayout === !!on) return;
-    if (on) sizes.vertLayout = true; else delete sizes.vertLayout;
+  // ---- watch-count (how many tiles to show) ----
+  // The chosen count lives in our own LAYOUT_KEY blob (menu.js only knows its
+  // legacy numeric `layout` setting). 'auto' fits as many tiles as comfortably
+  // display for the current orientation. Default 'auto' on first run.
+  // A ?watch=N URL param is a SESSION override (used by pop-out to force a single
+  // tile) that wins over the persisted choice WITHOUT writing localStorage — so a
+  // popped window can't bleed its count back into the main window's shared blob.
+  let _watchUrlOverride = readWatchFromUrl();
+  function readWatchFromUrl() {
+    try {
+      if (typeof location === 'undefined' || !location.search) return null;
+      const raw = new URLSearchParams(location.search).get('watch');
+      if (raw == null) return null;
+      if (raw === WATCH_AUTO) return WATCH_AUTO;
+      const n = Number(raw);
+      return (n >= MIN_WATCH && n <= MAX_WATCH) ? n : null;
+    } catch (_) { return null; }
+  }
+  /** @returns {number|string} */
+  function watchChoice() {
+    if (_watchUrlOverride != null) return _watchUrlOverride;
+    const w = sizes.watchN;
+    if (w === WATCH_AUTO) return WATCH_AUTO;
+    const n = Number(w);
+    return (n >= MIN_WATCH && n <= MAX_WATCH) ? n : WATCH_AUTO;
+  }
+  function setWatchChoice(v) {
+    // an explicit pick from the dropdown/palette drops any URL session override.
+    _watchUrlOverride = null;
+    const next = v === WATCH_AUTO ? WATCH_AUTO : clamp(Number(v) || MIN_WATCH, MIN_WATCH, MAX_WATCH);
+    if (sizes.watchN === next) return;
+    sizes.watchN = next;
     saveSizes(LAYOUT_KEY, sizes);
+  }
+  // resolve the watch choice to a concrete tile count for the current viewport.
+  function watchCount() {
+    const w = watchChoice();
+    if (w !== WATCH_AUTO) return w;
+    return autoWatchCount();
+  }
+  // 'auto': as many tiles as comfortably fit — capped per orientation, and never
+  // more than the number of active threads (so we don't show a wall of empties).
+  function autoWatchCount() {
+    const cap = isPortrait() ? AUTO_MAX_PORTRAIT : AUTO_MAX_LANDSCAPE;
+    let active = 0;
+    try { active = activeThreads().length; } catch (_) { active = 0; }
+    return clamp(active || 1, MIN_WATCH, cap);
   }
 
   // ---- collapsed tile state (keyed by THREAD id so it survives reflows/reloads) ----
@@ -278,50 +364,47 @@ export function mountMosaic(rootEl, store) {
     saveSizes(LAYOUT_KEY, sizes);
   }
 
-  // is the viewport portrait (taller than wide)? drives the landscape→stacked remap.
+  // is the viewport portrait (taller than wide)? AUTO-DETECTED — drives the
+  // landscape(more-cols) ↔ portrait(more-rows) arrangement in tilesToGrid. Uses
+  // matchMedia('(orientation:portrait)') when available, with a dimensions check
+  // as a fallback / cross-check (some embeds report a stale media query).
   function isPortrait() {
     try {
       if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-        return window.matchMedia('(orientation: portrait)').matches;
+        const mq = window.matchMedia('(orientation: portrait)');
+        if (typeof mq.matches === 'boolean') return mq.matches;
       }
-      return window.innerHeight > window.innerWidth;
-    } catch (_) { return false; }
+    } catch (_) {}
+    try { return window.innerHeight > window.innerWidth; } catch (_) { return false; }
   }
 
-  // The layout the mosaic should render: 'vert' if chosen, else the menu's numeric
-  // layout. (auto-pick: if the operator never chose and the screen is portrait, we
-  // bias the *orientation* of numeric layouts via effDims rather than force 'vert'.)
-  function activeLayoutId() { return vertChosen() ? 'vert' : menu.effLayout(); }
+  // A stable signature for the CURRENT arrangement (count + orientation), used for
+  // the data-layout attribute, the track-storage key, and the gutter-rebuild key.
+  // Replaces the old numeric/'vert' layout id. e.g. 'n4', or 'auto' when the
+  // count is auto-resolved (the concrete dims still come from effDims()).
+  function activeLayoutId() {
+    const w = watchChoice();
+    return w === WATCH_AUTO ? 'auto' : ('n' + w);
+  }
 
-  // effective cols×rows for the active layout, portrait-remapped when applicable.
-  // For 'vert' the row count is dynamic (fills the height) → 1 col × vertRowCount.
+  // effective cols×rows for the current watch-count, oriented by auto-detection.
   function effDims() {
-    const id = activeLayoutId();
-    if (id === 'vert') return { cols: 1, rows: vertRowCount() };
-    const base = GRID_DIMS[id] || GRID_DIMS[2];
-    return isPortrait() ? (PORTRAIT_DIMS[id] || base) : base;
+    return tilesToGrid(watchCount(), isPortrait());
   }
 
-  // number of tiles the active layout shows (cols*rows).
+  // number of tiles the grid shows (cols*rows ≥ watchCount; the slack cell, if any,
+  // renders as an empty tile).
   function effSlots() {
     const d = effDims();
     return d.cols * d.rows;
   }
 
-  // vertical layout row count: enough rows to fill the grid height (min 2, max 8).
-  function vertRowCount() {
-    let h = 0;
-    try { h = grid.getBoundingClientRect().height || 0; } catch (_) {}
-    if (!h) { try { h = stage.getBoundingClientRect().height || 0; } catch (_) {} }
-    const per = 220; // target tile height in the stack
-    return clamp(Math.round(h / per) || 3, 2, 8);
-  }
-
-  // storage key for a layout's track sizes (orientation-aware so portrait/landscape
-  // keep independent splits).
+  // storage key for this arrangement's track sizes — keyed by the concrete dims +
+  // orientation so each cols×rows shape (portrait/landscape) keeps independent
+  // splits and they don't collide as the count changes.
   function trackKey() {
-    const id = activeLayoutId();
-    return 'layout' + id + (isPortrait() && id !== 'vert' ? 'P' : '');
+    const d = effDims();
+    return 'grid' + d.cols + 'x' + d.rows + (isPortrait() ? 'P' : '');
   }
 
   // normalize a weight array to N tracks (default = equal fr), clamped each ≥ min.
@@ -588,7 +671,7 @@ export function mountMosaic(rootEl, store) {
     applyRailWidth();
   }
 
-  // viewport resize: re-evaluate portrait remap + vert row count, then re-gutter.
+  // viewport resize: re-evaluate orientation + auto tile-count, then re-arrange.
   let _roTimer = null;
   function onViewportResize() {
     if (_roTimer) clearTimeout(_roTimer);
@@ -1230,14 +1313,13 @@ export function mountMosaic(rootEl, store) {
       const t = tiles.pop();
       if (t) { stopWatch(t); teardownPane(t); t.elTile.remove(); }
     }
-    // data-layout reflects the CHOICE ('1'|'2'|'4'|'6'|'vert'); data-cols/-rows give
-    // the effective (portrait-remapped / vert-scaled) track counts the CSS uses.
+    // data-layout reflects the arrangement signature ('n4' / 'auto'); data-cols/-rows
+    // give the concrete (orientation-detected) track counts the CSS fallback uses
+    // before JS writes inline fr weights.
     const dims = effDims();
-    const colsN = layout === 'vert' ? 1 : dims.cols;
-    const rowsN = layout === 'vert' ? slots : dims.rows;
     grid.setAttribute('data-layout', String(layout));
-    grid.setAttribute('data-cols', String(colsN));
-    grid.setAttribute('data-rows', String(rowsN));
+    grid.setAttribute('data-cols', String(dims.cols));
+    grid.setAttribute('data-rows', String(dims.rows));
 
     // ---- bind tiles to chosen threads (reconcile, minimal churn) ----
     for (let i = 0; i < slots; i++) {
@@ -1312,13 +1394,8 @@ export function mountMosaic(rootEl, store) {
     pending = true;
     Promise.resolve().then(() => {
       pending = false;
-      // cheap structural check: did the visible binding change?
-      const layout = menu.effLayout();
-      const mode = menu.effMode();
-      const ranked = activeThreads();
-      // recompute a quick signature of what *would* be visible (top slots).
-      // We always reflow because reflow itself is reconciling + cheap, but we
-      // short-circuit per-tile live refresh below regardless.
+      // reflow is itself reconciling + cheap, so we always run it; the per-tile
+      // live refresh below then repaints chrome/fanout/fallback/screen.
       reflow();
       for (let i = 0; i < tiles.length; i++) {
         const tile = tiles[i];
@@ -1330,7 +1407,6 @@ export function mountMosaic(rootEl, store) {
       }
       updateRedactionChip();
       syncBar();
-      void ranked; void layout; void mode;
     });
   }
 
@@ -1512,6 +1588,10 @@ export function mountMosaic(rootEl, store) {
     try {
       const u = new URL(window.location.href);
       u.searchParams.set('thread', threadId);
+      // force the popped window to a single tile via the session ?watch override
+      // (does NOT write the shared localStorage count, so the parent window keeps
+      // its own choice). 'layout' is kept for back-compat with menu.js URL state.
+      u.searchParams.set('watch', '1');
       u.searchParams.set('layout', '1');
       u.searchParams.set('view', (tiles[focusedTileIdx] && tiles[focusedTileIdx].viewMode) || 'ide');
       // keep token so the popped window authenticates the same way
@@ -1544,31 +1624,21 @@ export function mountMosaic(rootEl, store) {
 
   // ================================================================ bar sync
   function syncBar() {
-    const layout = activeLayoutId();
     const mode = menu.effMode();
-    for (const k of Object.keys(layoutBtns)) {
-      const on = (k === 'vert') ? (layout === 'vert') : (Number(k) === layout);
-      layoutBtns[k].setAttribute('aria-pressed', String(on));
-    }
+    // reflect the watch choice into the dropdown ('auto' or the number).
+    const w = watchChoice();
+    const wv = w === WATCH_AUTO ? WATCH_AUTO : String(w);
+    if (watchSel.value !== wv) watchSel.value = wv;
     const b = modeChip.querySelector('b');
     if (b) b.textContent = mode === 'focus' ? 'follow-latest' : mode;
   }
 
-  // choose a layout from the bar/palette. 'vert' is the mosaic's own portrait stack
-  // (stored in our LAYOUT_KEY since menu.js only knows numeric layouts); numeric
-  // layouts clear the vert choice and flow through menu.js as before.
-  function setLayout(ly) {
-    sizes.userChose = true; saveSizes(LAYOUT_KEY, sizes); // remember explicit pick
-    if (ly === 'vert') {
-      setVertChosen(true);
-      reflow(true);
-      syncBar();
-    } else {
-      setVertChosen(false);
-      menu.setView({ layout: ly });
-      menu.setSetting('layout', ly); // triggers applySettings → reflow
-      syncBar();
-    }
+  // choose how many sessions to watch from the dropdown. Persists the choice in
+  // our LAYOUT_KEY blob and reflows; orientation stays auto-detected independently.
+  function setWatch(v) {
+    setWatchChoice(v);
+    reflow(true);
+    syncBar();
   }
   function cycleMode() {
     const order = ['focus', 'per-tile', 'manual'];
@@ -1579,7 +1649,20 @@ export function mountMosaic(rootEl, store) {
   }
 
   // ================================================================ settings/view appliers
+  // The grid count is now owned by our watchN dropdown, but menu.js's palette still
+  // offers legacy "Set layout: N-up" commands (it can't know about watchN). Bridge
+  // them: when menu's numeric `layout` setting CHANGES, mirror it into watchN so the
+  // palette command takes effect. Plain settings churn (density/accent/…) doesn't
+  // touch the count because we only act on an actual layout delta.
+  let _lastMenuLayout; // undefined until the first applySettings (adopt silently)
   function applySettings(s) {
+    if (s && s.layout != null) {
+      const ly = Number(s.layout);
+      // first call adopts the current value WITHOUT clobbering the watchN default;
+      // only a subsequent CHANGE (a palette "N-up" pick) mirrors into watchN.
+      if (_lastMenuLayout !== undefined && ly !== _lastMenuLayout) setWatchChoice(ly);
+      _lastMenuLayout = ly;
+    }
     root.setAttribute('data-density', s.density);
     root.setAttribute('data-accent', s.accent);
     syncBar();
@@ -1625,7 +1708,7 @@ export function mountMosaic(rootEl, store) {
     resetLayout: () => {
       maximizedTileIdx = -1;
       tiles.forEach((t) => { t.pinned = false; t.frozen = false; t.flagged = false; t.collapsed = false; });
-      // also clear persisted pane sizes (track splits + rail width + vert choice)
+      // also clear persisted pane sizes (track splits + rail width + watch count)
       // and every collapsed-tile flag (in-memory set + persisted list).
       sizes = {}; railCollapsed = false; collapsedThreads.clear(); saveSizes(LAYOUT_KEY, sizes);
       rail.style.width = ''; lastGutterKey = '';
@@ -1647,25 +1730,23 @@ export function mountMosaic(rootEl, store) {
   root.setAttribute('data-density', menu.settings.density);
   root.setAttribute('data-accent', menu.settings.accent);
 
-  // portrait auto-pick: on a tall screen, if the operator has NEVER made an
-  // explicit layout choice, default to the vertical stack. An explicit choice
-  // (numeric OR vert) is remembered in sizes.userChose and always wins.
-  if (!sizes.userChose && !vertChosen() && isPortrait()) {
-    setVertChosen(true);
-  }
+  // Watch-count defaults to 'auto' (watchChoice() returns WATCH_AUTO when unset)
+  // and orientation is auto-detected — so there is NO boot-time layout pick to do;
+  // the first reflow arranges tiles for the current count + orientation.
 
   // register this mosaic; setController pushes settings+view → applySettings (which
   // reflows) + applyView (focus). One initialization path, no redundant reflows.
   menu.setController(controller);
 
-  // re-evaluate portrait/orientation + vert row-count on viewport changes.
+  // re-evaluate orientation (portrait↔landscape) + auto tile-count on viewport
+  // changes, then re-arrange the grid.
   if (typeof window !== 'undefined') {
     window.addEventListener('resize', onViewportResize);
     if (typeof window.matchMedia === 'function') {
       try { window.matchMedia('(orientation: portrait)').addEventListener('change', onViewportResize); } catch (_) {}
     }
   }
-  // one rAF correction so vert row-count + gutter positions use real laid-out sizes.
+  // one rAF correction so the auto tile-count + gutter positions use real laid-out sizes.
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => reflow(true));
 
   // initial live paint + subscribe (rAF-batched inside the store)
