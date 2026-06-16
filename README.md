@@ -92,6 +92,35 @@ There's also a handoff helper that prints a fresh-session continuation one-liner
 python3 -u -m wyc handoff <thread_id>
 ```
 
+## Better with tmux (recommended)
+
+watchyourclankers works **without** tmux — the transcript tail is the canonical feed, so
+the editor, terminal, file-peeks, and activity all work regardless. But it's **better with
+tmux**, which gives three things the transcript can't (see `wyc/tmux.py`):
+
+- **Liveness** — it knows a `claude` process actually owns a live pane *right now*, not just
+  inferred from how recently the transcript changed.
+- **Identity & thread-stitching** — the tmux **session name** and **group** are the cleanest
+  signal for grouping a session into a *thread* and following it across handoff leapfrogs (a
+  tmux *group* is treated as the handoff chain). Sessions stitch far more reliably than by
+  fuzzy name-matching alone.
+- **The live screen mirror** — the literal rendered TUI (`capture-pane`), shell output
+  included, as its own surface.
+
+So run Claude **inside tmux**:
+
+```bash
+tmux new -s myproject       # name it after the work — the name becomes the thread label
+claude                      # (or: claude --dangerously-skip-permissions)
+```
+
+wyc auto-detects panes whose command is `claude` (including `claude` under a wrapper shell).
+For a handoff chain, start the next session in the **same tmux group**
+(`tmux new-session -t myproject -s myproject-2`) — grouped sessions stitch into one thread.
+
+It is strictly **observer-only**: wyc only ever *reads* tmux (`list-panes` / `capture-pane`)
+— never `send-keys`, never any write to your sessions (Principle I).
+
 ## Development
 
 The pre-push gate is **`ci/fast.sh`** — it runs the full check ladder (Python import/lint, the pytest suite, frontend syntax + behavioral tests, render smoke, the live DOM-interaction probe, and the framework meta-gates) and prints the literal success token only when every check passed:
