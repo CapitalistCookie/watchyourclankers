@@ -70,3 +70,21 @@ version while the repo raced ahead) → `_check_prose_currency` now gates the `c
 (b) Manual sha-editing is itself a rot source → `tools/stamp_handoff.py` regenerates every marker in
 one command (`--check`/`--commit`). *Audit every gate for false-FAILS, not just false-passes: a
 finicky gate trains people to bypass it, which defeats the gate.*
+
+## L9 — The bug isn't in the file with the symptom; trace the CONTRACT seam (2026-06-16, operator rebuke ×10)
+Operator (emphatic, recurring): "Are you looking at contracts and the harness and framework?" The
+"terminal repeats the same command over and over" bug *looked* like a `renderTerminal` problem, and
+the file-first instinct was to hand-patch it. The real cause only showed by tracing the seam:
+`contracts/events.schema.json` (`Terminal` = `{ref_seq,data,done}` — no `command`/`chunks`) →
+`web/store.js` (`terminalForSession` aggregates + returns **all** buffers, uncapped) →
+`wyc/watcher.py` (producer is append-safe, emits each command once). The bug was the renderer
+iterating ALL store buffers while its "show only latest" eviction trimmed only its OWN `termBlocks`
+Map → evicted-but-still-in-store buffers looked new each tick and got re-created + re-typed. The
+**same investigation surfaced a second, unreported defect** the renderer hid: the store's terminal
+map was never bounded (a leak) — invisible from the renderer, obvious from the seam.
+**Fix discipline:** before the first edit, read the mandated bootstrap order (constitution →
+`contract.py`+`events.schema.json` → MASTER_PLAN → MODULE_BUILD_CHECKLIST → spec) and trace
+CONTRACT → producer → consumer; HONOR the interaction-guard (never "it's just plumbing"); fix
+RED-first via the pure tested module (`latestTerminalBuf`, the store cap). Codified in global memory
+`feedback-contract-first-before-editing` because the *promise* had failed 10+ times — contract-first
+is mechanical-discipline now, not a vibe.
