@@ -38,7 +38,14 @@ const fail = (m) => { console.log(`[cm-smoke] FAIL: ${m}`); failed = true; };
 try {
   const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
   const errors = [];
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  // Count REAL script errors only, NOT resource-load failures. The live app fetches
+  // /file for whatever the watched sessions edit, and a file outside WYC_FILE_ROOTS is
+  // path-jailed to 403 (Principle II) — unrelated app noise, not a CM-mount failure (a
+  // bundle/theme load failure surfaces via out.imported / out.error). Counting it made
+  // this gate false-fail intermittently (L8: a finicky gate trains bypassing).
+  page.on('console', (m) => {
+    if (m.type() === 'error' && !/Failed to load resource/i.test(m.text())) errors.push(m.text());
+  });
   page.on('pageerror', (e) => errors.push(String(e)));
 
   // Reachability: load the app shell so /static is served + same-origin import works.
