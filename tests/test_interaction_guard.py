@@ -28,7 +28,9 @@ def test_is_interaction_file_ignores_others():
 
 def test_build_context_carries_the_discipline():
     ac = build_context("web/ide.js")["hookSpecificOutput"]["additionalContext"]
-    for needle in ("RED-FIRST", "ci/interaction.mjs", "H9", "PURE"):
+    # contract-first (step 0, L9) MUST lead — the recurring failure was editing the
+    # symptomatic file without first reading the contract seam.
+    for needle in ("CONTRACT SEAM FIRST", "contract.py", "RED-FIRST", "ci/interaction.mjs", "H9", "PURE"):
         assert needle in ac, needle
 
 

@@ -26,7 +26,11 @@ INTERACTION_SUFFIXES = (
 
 REMINDER = (
     "[interaction-guard] You are editing watchyourclankers INTERACTION code. Follow the "
-    "harness, do NOT hand-edit straight to a fix (LESSONS L1/L5/L7 + MODULE_BUILD_CHECKLIST): "
+    "harness, do NOT hand-edit straight to a fix (LESSONS L1/L5/L7/L9 + MODULE_BUILD_CHECKLIST): "
+    "(0) READ THE CONTRACT SEAM FIRST — `wyc/contract.py` + `contracts/events.schema.json`, then "
+    "trace producer→consumer (e.g. wyc/watcher.py → web/store.js → here); the bug is rarely in "
+    "the file with the symptom and the fix often isn't either (L9 — the terminal-replay bug was a "
+    "store/seam issue, not renderTerminal). DON'T rationalize this step away ('it's just plumbing'). "
     "(1) EXTRACT the decision into a PURE module and `node --test` it RED-FIRST; "
     "(2) `ci/interaction.mjs` (a REAL pointer-drag DOM probe) must stay green — a pure-math "
     "test does NOT count; (3) H9-ENUMERATE every site of the concept before claiming done; "
