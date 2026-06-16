@@ -333,55 +333,6 @@ function microPauseAfter(chunk, atLineEnd, C) {
   }
   return extra;
 }
-
-/* ---- prefix/suffix diff (the load-bearing math for delete-then-type) -------
- * Given two strings (old, new), return {pre, oldMid, newMid, suf}: the common
- * leading run `pre`, the common trailing run `suf` (not overlapping `pre`), and
- * the differing middles. old === pre+oldMid+suf and new === pre+newMid+suf hold
- * exactly. Pure insertion ⇒ oldMid==='' ; pure deletion ⇒ newMid===''. The
- * caret deletes `oldMid` (right-to-left, inward from the suffix) then types
- * `newMid`. Pure (cheap, char-granular), unit-testable. */
-function diffMiddle(oldStr, newStr) {
-  const a = oldStr == null ? '' : String(oldStr);
-  const b = newStr == null ? '' : String(newStr);
-  const max = Math.min(a.length, b.length);
-  let pre = 0;
-  while (pre < max && a[pre] === b[pre]) pre++;
-  // common suffix, but never let prefix+suffix overlap on either string
-  let suf = 0;
-  const lim = Math.min(a.length - pre, b.length - pre);
-  while (suf < lim && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
-  return {
-    pre: a.slice(0, pre),
-    oldMid: a.slice(pre, a.length - suf),
-    newMid: b.slice(pre, b.length - suf),
-    suf: a.slice(a.length - suf),
-  };
-}
-
-/* ---- line-level prefix/suffix diff for a multi-line hunk -------------------
- * old/new are arrays of lines. Returns {head, oldBody, newBody, tail} where
- * `head`/`tail` are the counts of leading/trailing lines that are IDENTICAL
- * (and so render instantly, no animation), and the *Body slices are the
- * differing middle line arrays (delete the old body lines, type the new body
- * lines). Counts never overlap. Pure. */
-function diffLineBlock(oldLines, newLines) {
-  const a = Array.isArray(oldLines) ? oldLines : [];
-  const b = Array.isArray(newLines) ? newLines : [];
-  const max = Math.min(a.length, b.length);
-  let head = 0;
-  while (head < max && a[head] === b[head]) head++;
-  let tail = 0;
-  const lim = Math.min(a.length - head, b.length - head);
-  while (tail < lim && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
-  return {
-    head,
-    tail,
-    oldBody: a.slice(head, a.length - tail),
-    newBody: b.slice(head, b.length - tail),
-  };
-}
-
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => (
     c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
@@ -951,26 +902,18 @@ export function mountIdePane(mountEl, store, opts = {}) {
   // stable, splice only the changed line range, reveal it progressively); only a
   // file switch / fresh open / a doc whose unchanged context actually differs does
   // a full rebuild.
-  function renderFallback(path, content, focusLine, follow, hunkNew, hunkOld) {
+  function renderFallback(path, content, focusLine, follow, hunkNew) {
     ensureFallbackEl();
     const doc = String(content == null ? '' : content);
     const lines = doc.split('\n');
 
     // Compute the reveal range (0-based) for a live follow-edit with a real hunk.
-    // The range covers the NEW hunk's lines in the freshly-fetched content; we also
-    // carry the matching OLD lines (hunk_old) so the animation can show the edit as
-    // a real human would do it — DELETE the replaced text, then TYPE the new text.
     let reveal = null;
     if (follow && !followPaused && focusLine && focusLine > 0 && typeof hunkNew === 'string' && hunkNew.trim()) {
       const startIdx = Math.max(0, Math.min(focusLine - 1, lines.length - 1));
-      const newLines = hunkNew.replace(/\n+$/, '').split('\n');
-      const endIdx = Math.max(startIdx, Math.min(startIdx + newLines.length - 1, lines.length - 1));
-      // newLines anchored to what's actually mounted in the range (clamped at EOF)
-      const newRange = lines.slice(startIdx, endIdx + 1);
-      // oldLines = the replaced text (Edit) or [] for a pure insertion / Write.
-      const oldLines = (typeof hunkOld === 'string' && hunkOld.length)
-        ? hunkOld.replace(/\n+$/, '').split('\n') : [];
-      reveal = { startIdx, endIdx, oldLines, newLines: newRange };
+      const hunkLineCount = hunkNew.replace(/\n+$/, '').split('\n').length;
+      const endIdx = Math.max(startIdx, Math.min(startIdx + hunkLineCount - 1, lines.length - 1));
+      reveal = { startIdx, endIdx };
     }
 
     // IN-PLACE fast path: same file already mounted + a live follow-edit reveal +
@@ -1082,17 +1025,15 @@ export function mountIdePane(mountEl, store, opts = {}) {
   function updateFallbackHunkInPlace(path, lines, reveal, follow) {
     cancelFallbackReveal();
     const myGen = ++fallbackHlGen;   // supersede any prior reveal/highlight pass
-    // Reconcile any line a PRIOR (now-superseded) reveal left mid-edit (under-typed,
-    // blank, OR — now that we animate deletions — mid-DELETE and thus too LONG) but
+    // Reconcile any line a PRIOR (now-superseded) reveal left mid-typed/empty but
     // that the NEW reveal won't touch: snap it to its true text so a second edit
-    // arriving mid-animation never strands a wrong line. This only fixes drifted
-    // lines OUTSIDE the new range (a localized correction, not a screen re-fill);
-    // rows the new reveal owns are skipped (it seeds + settles them itself).
+    // arriving mid-animation never strands a blank line. This only fixes drifted
+    // lines outside the new range (a localized correction, not a screen re-fill).
     for (let li = 0; li < fallbackCodeEls.length && li < lines.length; li++) {
       if (li >= reveal.startIdx && li <= reveal.endIdx) continue;     // new reveal owns these
       const want = lines[li] || '';
       const cur = fallbackCodeEls[li];
-      if (cur && cur.textContent !== want) cur.textContent = want;
+      if (cur && cur.textContent !== want && cur.textContent.length < want.length) cur.textContent = want;
     }
     // keep our shadow line array in lockstep (lengths are equal — contextMatches)
     fallbackLines = lines.slice();
@@ -1202,57 +1143,94 @@ export function mountIdePane(mountEl, store, opts = {}) {
     removeCaret();
   }
 
-  // FEATURE B — CHARACTER-LEVEL REVEAL of a freshly-landed hunk, WITH DELETIONS.
-  // HONESTY: the transcript carries the WHOLE new hunk (and, for an Edit, the whole
-  // replaced hunk_old) as a COMPLETE block — there is NO real sub-hunk keystroke
-  // stream to replay. So this is a SIMULATED reveal: we already hold the final text
-  // and the replaced text; we ANIMATE A DIFF of that whole-hunk submission so it
-  // reads like a very fast but real human editing — backspace the old, type the new.
-  // It only paints text we genuinely received, never invents content, operates on the
-  // (read-only) fallback view, and settles to the exact full hljs-highlighted content.
+  // FEATURE B — STREAMING REVEAL of a freshly-landed hunk (FIX 1: natural rhythm,
+  // no full-screen dump). HONESTY: the transcript carries the WHOLE new hunk, not a
+  // sub-hunk character stream — nothing to replay keystroke-by-keystroke. So this is
+  // a SIMULATED reveal: we already have the final text; we just unveil the CHANGED
+  // region progressively so it reads like code being written into the file in place.
   // The surrounding document is already mounted and does NOT move (renderFallback /
-  // updateFallbackHunkInPlace keep it stable).
+  // updateFallbackHunkInPlace keep it stable). It only paints text we genuinely
+  // received, never invents content, operates on the (read-only) fallback view, and
+  // settles to the exact full hljs-highlighted content.
   //
-  // THE MATH (load-bearing): we diff hunk_old vs hunk_new — common PREFIX + common
-  // SUFFIX leave a differing middle. We DELETE the old middle char-by-char (inward
-  // from the end, like backspacing) then TYPE the new middle char-by-char. Multi-line
-  // hunks are diffed at the LINE level first (diffLineBlock → identical head/tail
-  // render instantly; differing body lines animate); each differing body row then
-  // gets a char-level diffMiddle so an in-line edit only backspaces what changed.
-  // The mounted DOM has exactly newLines.length rows for the range (the final file),
-  // so old body lines beyond that are folded into the last body row's deletion (we
-  // stay correct + cancel-safe rather than pixel-perfect on pathological diffs).
-  // Pure insertion ⇒ nothing to delete (just type). Pure deletion ⇒ nothing to type.
-  //
-  // CADENCE — char-level, organic, never a metronome or a dump:
-  //  - reveal INDIVIDUAL CHARACTERS; for big diffs, small 1-3 char chunks so it
-  //    stays char-ish but never freezes (chunk size scales with op count);
-  //  - the TARGET duration adapts to the recent inter-edit gap (adaptiveRevealMs),
-  //    distributed over the CHAR steps; per-step delay = base × ease(in→out) ×
-  //    (1 ± jitter), plus a MICRO-PAUSE at line breaks / after punctuation;
-  //  - a CARET rides the active delete/type position and blinks idle when done.
-  // CANCEL-AND-CONTINUE: a newer render bumps fallbackHlGen; the gen check aborts the
-  // old reveal and the newer one takes over. If a new edit arrives while this is
-  // mid-flight, the caller accelerates US to the finish first (a smooth speed-up).
+  // ORGANIC pacing — NO "type a prefix then SNAP the rest", and NOT a metronome:
+  //  - small/medium hunks reveal per WORD; hunks over CADENCE.LINE_CHARS reveal
+  //    per LINE (still progressive, never a dump);
+  //  - the TARGET duration adapts to the recent inter-edit gap (adaptiveRevealMs);
+  //  - per-step delay = base × ease(in→out) × (1 ± jitter), plus a MICRO-PAUSE at
+  //    line breaks / after punctuation — so it reads like a human typing;
+  //  - a blinking CARET rides the active position and is left blinking when done.
+  // CANCEL-AND-CONTINUE: a newer render bumps fallbackHlGen; the gen check here
+  // aborts the old reveal and the newer one takes over. If a new edit arrives while
+  // this block is still typing, the caller accelerates US to the finish first
+  // (accelerateRevealToFinish) — a smooth speed-up, not a snap/dump.
   function revealHunkInFallback(path, lines, codeEls, range, follow, gen) {
     const { startIdx, endIdx } = range;
-    const rangeLen = Math.max(0, Math.min(endIdx, codeEls.length - 1) - startIdx + 1);
-    // final (target) text per row of the range — what the file holds now.
-    const newRows = [];
-    for (let r = 0; r < rangeLen; r++) newRows.push(lines[startIdx + r] || '');
-    // the OLD text of the range (hunk_old). Absent for Write / pure insertion.
-    const oldRows = Array.isArray(range.oldLines) ? range.oldLines.slice() : [];
+    // total chars in the changed region decides word- vs line-granularity.
+    let totalChars = 0;
+    for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) totalChars += (lines[li] || '').length;
+    const byLine = totalChars > CADENCE.LINE_CHARS;   // big hunk -> reveal line-by-line
 
-    // Line-level diff: identical leading/trailing rows settle instantly; only the
-    // differing BODY rows animate. head/tail are counted against the NEW rows.
-    const { head, tail, oldBody, newBody } = diffLineBlock(oldRows.length ? oldRows : newRows, newRows);
-    const bodyStart = head;                         // first animated row (range-relative)
-    const bodyEndExcl = newRows.length - tail;      // one past last animated row
-    const bodyCount = Math.max(0, bodyEndExcl - bodyStart);
+    // Build the ordered reveal plan: {li, chunk, lineEnd} steps. Per word for normal
+    // hunks (split on whitespace boundaries, whitespace kept attached so words
+    // "appear"); per whole line for big hunks (one chunk == the full line) so we
+    // move through volume without ever dumping everything at once.
+    /** @type {{li:number, chunk:string, lineEnd:boolean}[]} */
+    const plan = [];
+    for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) {
+      const text = lines[li] || '';
+      codeEls[li].textContent = '';                 // start the changed line empty
+      if (byLine) {
+        plan.push({ li, chunk: text, lineEnd: true });             // whole line in one step
+      } else {
+        const pieces = text.match(/\S+\s*|\s+/g) || (text ? [text] : []);
+        if (!pieces.length) { plan.push({ li, chunk: '', lineEnd: true }); }   // blank line: one empty step (carriage feel)
+        else for (let k = 0; k < pieces.length; k++) plan.push({ li, chunk: pieces[k], lineEnd: k === pieces.length - 1 });
+      }
+    }
+    if (!plan.length) {                              // all-blank region: nothing to type
+      for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) codeEls[li].textContent = lines[li] || '';
+      fallbackRevealTimer = 0;
+      removeCaret();
+      return;
+    }
 
-    // settle one row to its full text, then hljs-highlight it in place (geometry is
-    // identical pre/post — highlight swaps innerHTML for equal-text token spans).
+    // running plain text per line (escaped via textContent on write).
+    const built = new Map();    // li -> string revealed so far
+    const ensure = (li) => { if (!built.has(li)) built.set(li, ''); return built.get(li); };
+
+    // Pace from the ADAPTIVE target: base = target/steps is the average cadence,
+    // clamped to a sane per-step band. We modulate it with a gentle ease that
+    // starts a touch slower (EASE_IN, settling into the block) and ends a touch
+    // quicker (EASE_OUT, winding down to "done"), and add ±JITTER so no two steps
+    // are identical (humans aren't constant). Micro-pauses (line break / punctuation)
+    // are added on top in tick(). `catchUp` (>1) compresses everything smoothly when
+    // a newer edit is waiting — a speed-up, never a snap.
+    const steps = plan.length;
+    revealTargetMs = adaptiveRevealMs();
+    const base = clamp(revealTargetMs / steps, CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS);
+    let catchUp = 1;            // >1 => compress remaining delays (smooth speed-up)
+    const easeAt = (idx) => {
+      const t = steps > 1 ? idx / (steps - 1) : 1;   // 0..1 progress
+      // ease in then out: a smooth hump that begins at EASE_IN, dips toward 1 in
+      // the middle, and finishes at EASE_OUT — quicker at the tail, never abrupt.
+      return CADENCE.EASE_IN + (CADENCE.EASE_OUT - CADENCE.EASE_IN) * t;
+    };
+    const jitter = () => 1 + (Math.random() * 2 - 1) * CADENCE.JITTER;
+    const delayFor = (idx, step) => {
+      let d = base * easeAt(idx) * jitter() / catchUp;
+      // micro-pause AFTER this step (punctuation / line break) — also scaled by
+      // catchUp so accelerate-to-finish stays smooth through pauses too.
+      if (step) d += microPauseAfter(step.chunk, step.lineEnd, CADENCE) / catchUp;
+      return clamp(Math.round(d), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS + CADENCE.PAUSE_SENTENCE_MS);
+    };
+
+    let i = 0;
     const settleLine = (li) => {
+      // settle one line to its full text, then hljs-highlight it in place. We set
+      // textContent to the SAME string it already holds before highlighting so the
+      // box geometry is identical pre/post — highlighting swaps innerHTML for inline
+      // token spans of equal text, so no reflow/flash of the settled line.
       const full = lines[li] || '';
       if (codeEls[li] && codeEls[li].textContent !== full) codeEls[li].textContent = full;
       ensureHljs().then((hljs) => {
@@ -1262,165 +1240,31 @@ export function mountIdePane(mountEl, store, opts = {}) {
       });
     };
 
-    // Identical head/tail rows: paint final text now (no animation), so only the
-    // genuinely-changed band moves. (For a full render the DOM already shows the new
-    // text; for in-place it may show stale text — settling here makes both correct.)
-    for (let r = 0; r < newRows.length; r++) {
-      if (r >= bodyStart && r < bodyEndExcl) continue;   // body row — animated below
-      if (codeEls[startIdx + r]) settleLine(startIdx + r);
-    }
-
-    // SEED the animated body rows with their OLD content (so deletions are visible).
-    // Align old↔new body rows by index; surplus old body lines (old had more rows
-    // than the new layout allows) are folded onto the LAST body row so their chars
-    // get backspaced away rather than silently vanishing. Rows with no old content
-    // start empty (pure insertion at that row → just type).
-    /** @type {string[]} */
-    const seed = new Array(bodyCount).fill('');
-    for (let j = 0; j < bodyCount; j++) {
-      const li = startIdx + bodyStart + j;
-      let s = '';
-      if (j < newBody.length) {
-        if (j < bodyCount - 1) s = (j < oldBody.length) ? oldBody[j] : '';
-        else {
-          // last animated row absorbs any surplus old body lines (joined) so all
-          // removed text is actually shown being deleted.
-          const tailOld = oldBody.slice(j).join('\n');
-          s = tailOld;
-        }
-      }
-      seed[j] = s;
-      if (codeEls[li]) codeEls[li].textContent = s;   // mount the old text to delete
-    }
-
-    // Build the flat CHAR op list. Phase 1 = DELETE the differing old-middle of each
-    // body row, bottom-up, inward from the end (backspacing). Phase 2 = TYPE the
-    // differing new-middle of each body row, top-down. The shared prefix/suffix of a
-    // row never moves (diffMiddle), so an in-line tweak only edits what changed.
-    // Each op carries the row index `li`, the resulting row TEXT after the op, and a
-    // `boundary` flag (last op of a row → settle/highlight + micro-pause).
-    /** @type {{li:number, text:string, kind:('del'|'type'), boundary:boolean, lastChar:string}[]} */
-    const ops = [];
-    // per-row char diff between seeded-old and target-new (one entry per body row)
-    const rowDiffs = [];
-    for (let j = 0; j < bodyCount; j++) {
-      const want = (j < newBody.length) ? newBody[j] : '';   // target text for this row
-      rowDiffs.push(diffMiddle(seed[j], want));
-    }
-    // Phase 1: deletions, bottom-up rows, right-to-left within a row.
-    for (let j = bodyCount - 1; j >= 0; j--) {
-      const li = startIdx + bodyStart + j;
-      const d = rowDiffs[j];
-      let cur = d.pre + d.oldMid + d.suf;            // == seed[j]
-      // delete oldMid one char at a time from its right edge (just before suf)
-      for (let k = d.oldMid.length - 1; k >= 0; k--) {
-        const removed = cur[d.pre.length + k];
-        cur = cur.slice(0, d.pre.length + k) + cur.slice(d.pre.length + k + 1);
-        ops.push({ li, text: cur, kind: 'del', boundary: false, lastChar: removed });
-      }
-    }
-    // Phase 2: typing, top-down rows, left-to-right within a row.
-    for (let j = 0; j < bodyCount; j++) {
-      const li = startIdx + bodyStart + j;
-      const d = rowDiffs[j];
-      let cur = d.pre + d.suf;                       // post-delete state of the row
-      const want = d.pre + d.newMid + d.suf;
-      for (let k = 0; k < d.newMid.length; k++) {
-        const ch = d.newMid[k];
-        cur = d.pre + d.newMid.slice(0, k + 1) + d.suf;
-        ops.push({ li, text: cur, kind: 'type', boundary: false, lastChar: ch });
-      }
-      // mark the final op that LEAVES this row at its target as a boundary (settle).
-      // A row whose new text already equals its seed (e.g. pure-deletion row, or an
-      // unchanged-middle row that only lost lines) still needs a boundary settle.
-      let lastForRow = -1;
-      for (let oi = ops.length - 1; oi >= 0; oi--) { if (ops[oi].li === li) { lastForRow = oi; break; } }
-      if (lastForRow >= 0 && ops[lastForRow].text === want) ops[lastForRow].boundary = true;
-      else if (codeEls[li]) settleLine(li);          // no op ends on target → settle now
-    }
-
-    if (!ops.length) {                               // nothing to animate — settle all + idle
-      for (let r = bodyStart; r < bodyEndExcl; r++) if (codeEls[startIdx + r]) settleLine(startIdx + r);
-      placeCaretAtLine(Math.min(endIdx, codeEls.length - 1));
-      idleCaret();
-      fallbackRevealTimer = 0;
-      return;
-    }
-
-    // CHUNKING for big diffs: keep it CHAR-ish but never freeze. Group consecutive
-    // ops on the SAME row + SAME kind into a small chunk (1-3 chars) sized by total
-    // op count, so a huge diff still steps in small char-bursts (not whole lines).
-    const chunkSize = ops.length > 1400 ? 3 : ops.length > 600 ? 2 : 1;
-    /** @type {{li:number, text:string, kind:('del'|'type'), boundary:boolean, lastChar:string, n:number}[]} */
-    const plan = [];
-    for (let p = 0; p < ops.length; ) {
-      let q = p;
-      const li = ops[p].li, kind = ops[p].kind;
-      // extend the chunk while same row+kind, not past a boundary, up to chunkSize
-      while (q < ops.length && ops[q].li === li && ops[q].kind === kind &&
-             (q - p) < chunkSize && !(ops[q].boundary && q > p)) q++;
-      // a boundary op terminates its chunk (include it as the chunk's last op)
-      if (q < ops.length && ops[q].boundary && ops[q].li === li && ops[q].kind === kind && q === p) q++;
-      const last = ops[Math.min(q, ops.length) - 1];
-      plan.push({ li, text: last.text, kind, boundary: last.boundary, lastChar: last.lastChar, n: q - p });
-      p = q;
-    }
-
-    // Pace from the ADAPTIVE target distributed over the CHAR steps. base =
-    // target/steps is the average cadence, clamped to a sane per-step band; a gentle
-    // ease (slower in → quicker out) + ±JITTER + micro-pauses at line breaks /
-    // punctuation make it organic. `catchUp` (>1) compresses smoothly when a newer
-    // edit is waiting — a speed-up, never a snap.
-    const steps = plan.length;
-    revealTargetMs = adaptiveRevealMs();
-    const base = clamp(revealTargetMs / steps, CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS);
-    let catchUp = 1;
-    const easeAt = (idx) => {
-      const t = steps > 1 ? idx / (steps - 1) : 1;
-      return CADENCE.EASE_IN + (CADENCE.EASE_OUT - CADENCE.EASE_IN) * t;
-    };
-    const jitter = () => 1 + (Math.random() * 2 - 1) * CADENCE.JITTER;
-    const delayFor = (idx, step) => {
-      if (!step) return CADENCE.STEP_FLOOR_MS;
-      let d = base * easeAt(idx) * jitter() / catchUp;
-      // deletions feel a touch faster than typing (backspacing is quick); chunks of
-      // n chars cost a bit more than one but sub-linearly (the burst reads as one).
-      if (step.kind === 'del') d *= 0.7;
-      if (step.n > 1) d *= 1 + 0.4 * (step.n - 1);
-      // micro-pause AFTER a step only when it SETTLES a line (line break) or ends on
-      // punctuation while typing — scaled by catchUp so accelerate stays smooth.
-      if (step.boundary || (step.kind === 'type')) {
-        d += microPauseAfter(step.lastChar, step.boundary, CADENCE) / catchUp;
-      }
-      return clamp(Math.round(d), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS + CADENCE.PAUSE_SENTENCE_MS);
-    };
-
-    let i = 0;
     const tick = () => {
       // aborted by a newer render / teardown / file-switch? (cancel-and-continue:
-      // the newer reveal owns the region now; we just stop. caret removed by
+      // the newer reveal owns the region now; we just stop. caret is removed by
       // cancelFallbackReveal in that path.)
       if (destroyed || gen !== fallbackHlGen || !fallbackEl) { fallbackRevealTimer = 0; return; }
       if (i >= plan.length) {                        // done — gently, no dump
-        // safety settle: ensure every body row holds its exact target text + hl.
-        for (let r = bodyStart; r < bodyEndExcl; r++) if (codeEls[startIdx + r]) settleLine(startIdx + r);
         if (follow && !followPaused) { lastFollowLine = Math.min(endIdx + 1, lines.length); scrollFallbackToLine(lastFollowLine, false); }
         // park the caret blinking at the last typed line (the "paused typist" look)
-        placeCaretAtLine(Math.min(endIdx, codeEls.length - 1));
+        placeCaretAtLine(endIdx);
         idleCaret();
         fallbackRevealTimer = 0;
         return;
       }
       const step = plan[i];
-      const li = step.li;
-      if (codeEls[li]) codeEls[li].textContent = step.text;   // plain text mid-edit (escaped via textContent)
-      // caret rides the active delete/type row (solid while editing)
+      const { li, chunk } = step;
+      const next = ensure(li) + chunk;
+      built.set(li, next);
+      if (codeEls[li]) codeEls[li].textContent = next;   // plain text while typing (escaped via textContent)
+      // caret rides the active line (solid while typing)
       placeCaretAtLine(li);
-      // a boundary step LEAVES this row at its final text → settle + highlight it so
-      // revealed code colorizes as it lands (re-place the caret after, since the
-      // innerHTML rewrite drops the inserted caret node).
-      if (step.boundary) { settleLine(li); placeCaretAtLine(li); }
-      // follow the active row (1-based), honoring the pause state
+      // when this step completes a line, settle + highlight it so revealed code
+      // colorizes as it lands (re-place the caret after, since innerHTML rewrite
+      // drops the inserted caret node).
+      if (step.lineEnd) { settleLine(li); placeCaretAtLine(li); }
+      // follow the revealing line (1-based), honoring the pause state
       if (follow && !followPaused) {
         lastFollowLine = li + 1;
         scrollFallbackToLine(li + 1, false);
@@ -1431,8 +1275,8 @@ export function mountIdePane(mountEl, store, opts = {}) {
 
     // Accelerate THIS reveal to its finish smoothly (used when a new edit arrives
     // mid-reveal so we never lag reality). We RAMP the compression instead of
-    // snapping: each call increases catchUp, so remaining steps tighten toward the
-    // floor over a few frames rather than dumping in one. Exposed via closure.
+    // snapping: each call increases catchUp, so the remaining steps tighten toward
+    // the floor over a few frames rather than dumping in one. Exposed via closure.
     revealHunkInFallback._accelerate = () => { catchUp = Math.min(catchUp * 3.5, 40); };
 
     cancelFallbackReveal();
@@ -1524,7 +1368,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
 
   // Set the editor's document to `content` for `path`, choose the language, then
   // (optionally) scroll-to + flash the hunk line, and typewriter-reveal newHunk.
-  async function showFileInEditor(path, content, focusLine, hunkNew, hunkOld, follow) {
+  async function showFileInEditor(path, content, focusLine, hunkNew, follow) {
     const myToken = ++fetchToken;
     const doc = String(content == null ? '' : content);
     // LOCATE the change ourselves (Activity.line is usually null): match the
@@ -1538,7 +1382,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     if (destroyed || myToken !== fetchToken) return; // a newer swap superseded us
 
     if (cmFailed || !cm) {
-      renderFallback(path, doc, targetLine, follow, hunkNew, hunkOld);
+      renderFallback(path, doc, targetLine, follow, hunkNew);
       return;
     }
     attachCmDom();
@@ -1756,12 +1600,11 @@ export function mountIdePane(mountEl, store, opts = {}) {
     updateEditorMeta(path);
     const force = !!opts2.force;
     const hunkNew = opts2.hunkNew || null;
-    const hunkOld = opts2.hunkOld || null;   // Edit carries this (the replaced text); Write doesn't
     const follow = !!opts2.follow;
     fetchFile(path, force).then((rec) => {
       if (destroyed || activeTab !== path) return; // user/auto moved on
       updateEditorMeta(path, rec);
-      showFileInEditor(path, rec.content, focusLine, hunkNew, hunkOld, follow);
+      showFileInEditor(path, rec.content, focusLine, hunkNew, follow);
     });
   }
 
@@ -2049,21 +1892,15 @@ export function mountIdePane(mountEl, store, opts = {}) {
     for (const buf of bufs) {
       let b = termBlocks.get(buf.ref_seq);
       if (!b) {
-        // UNIFIED FEED: each command flows INLINE in one continuous shell-like
-        // column — no boxed card. `$ <cmd>` on its own line, output directly
-        // beneath, then a small dim trailing `exit N` marker at the END of the
-        // output (not a pill on the command row). Same elements/classes the
-        // reveal+reconcile logic keys off (cmdEl / outEl / exitEl); only the
-        // layout/placement changed (exit moved after the output).
-        const block = el('div', 'term-block');
+        const block = el('div', 'term-block flash');
         const cmd = el('div', 'term-cmd');
         cmd.append(el('span', 'prompt', '$'));
         const cmdEl = el('span', 'cmd');
         cmd.append(cmdEl);
-        const outEl = el('pre', 'term-out');
-        // exit marker renders compact at the tail of the command's output.
         const exitEl = el('span', 'exit run', '…');
-        block.append(cmd, outEl, exitEl);
+        cmd.append(exitEl);
+        const outEl = el('pre', 'term-out');
+        block.append(cmd, outEl);
         termFeed.append(block);
         b = { block, cmdEl, outEl, exitEl, srcChunks: 0, targetCmd: null, cmdShown: 0, pendingOut: '', exitReady: null, done: false };
         termBlocks.set(buf.ref_seq, b);
@@ -2343,7 +2180,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     // a new edit to a file we've shown means its cached content is stale: re-fetch
     // (cache-bust). For a file we've never opened, the first fetch is fine.
     const force = fileCache.has(path);
-    openFile(path, line, { flash: true, force, hunkNew: target.hunk_new, hunkOld: target.hunk_old, follow: true });
+    openFile(path, line, { flash: true, force, hunkNew: target.hunk_new, follow: true });
   }
 
   /* ==================================================================== render loop */

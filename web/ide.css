@@ -436,52 +436,32 @@
 }
 
 /* ============================================================ terminal
- * ONE CONTINUOUS FEED — reads like tailing a real shell, NOT boxed mini-panels.
- * A single scrolling monospace pane on the void bg: each command flows inline as
- * `$ <command>` (dim `$` marker), its output directly beneath in muted text, then
- * the next `$ <command>` — all in one column. No per-command card (no border / no
- * separate panel background / no sticky header); at most a hair of vertical space
- * between commands. The exit code is a small dim/red `exit N` at the TAIL of a
- * command's output. Scrolls within .ide-body; autoscroll handled in ide.js. */
-.term-feed {
-  padding: 6px 0 8px;
-  font-family: var(--mono); font-size: 12px; line-height: 1.45;
-  background: var(--bg-void);
-}
-/* a command + its output = one inline group in the column. No box: just a touch
- * of breathing room above each command so consecutive commands stay readable. */
-.ide .term-block { padding: 0; background: transparent; border: none; }
-.ide .term-block + .term-block { margin-top: 6px; }
-/* the `$ <command>` line — inline in the feed, no panel/background/border/sticky */
+ * Bottom panel: void bg, mono, preserve whitespace, command lines brighter,
+ * output muted, exit-code pill. Scrolls within .ide-body. */
+.term-feed { padding-bottom: 8px; }
+.ide .term-block { border-bottom: 1px solid var(--border-c); }
 .ide .term-cmd {
   display: flex; align-items: baseline; gap: 8px;
-  padding: 1px 12px 0;
+  padding: 5px 12px;
   font-family: var(--mono); font-size: 12px;
-  background: transparent;
-  border: none;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-c);
+  position: sticky; top: 0; z-index: 1;
 }
-.ide .term-cmd .prompt { color: var(--accent-olive); opacity: .8; flex: 0 0 auto; }
+.ide .term-cmd .prompt { color: var(--accent-olive); font-weight: 700; }
 .ide .term-cmd .cmd { color: var(--text-primary); white-space: pre-wrap; word-break: break-all; }
-/* output: directly beneath the command, muted, monospace, in the same column */
+.ide .term-cmd .exit { font-size: 9px; padding: 1px 7px; white-space: nowrap; margin-left: auto;
+  text-transform: uppercase; letter-spacing: .06em; }
+.ide .term-cmd .exit.run { color: var(--accent-amber); border: 1px solid var(--accent-amber); }
+.ide .term-cmd .exit.ok  { color: var(--accent-olive); border: 1px solid var(--accent-olive); }
+.ide .term-cmd .exit.bad { color: var(--accent-red); border: 1px solid var(--accent-red); }
 .ide .term-out {
-  margin: 0; padding: 1px 12px 0;
+  margin: 0; padding: 6px 12px 10px;
   font-family: var(--mono); font-size: 12px; line-height: 1.45;
   color: var(--text-secondary);
   white-space: pre-wrap; word-break: break-word;
 }
-.ide .term-out:empty { display: none; }
-/* exit code: a small, dim trailing marker at the END of the command's output
- * (e.g. `exit 0` dim, `exit N` red) — NOT a bordered pill on a card. */
-.ide .term-block .exit {
-  display: block;
-  padding: 0 12px 0;
-  font-family: var(--mono); font-size: 10px;
-  white-space: nowrap;
-  opacity: .75;
-}
-.ide .term-block .exit.run { color: var(--text-muted); }
-.ide .term-block .exit.ok  { color: var(--text-muted); }
-.ide .term-block .exit.bad { color: var(--accent-red); opacity: 1; }
+.ide .term-cmd.flash { animation: tabflash 1s ease-out; }
 
 /* ============================================================ raw tmux screen */
 .ide-screen {
