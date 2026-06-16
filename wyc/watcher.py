@@ -198,8 +198,11 @@ class Watcher:
         elif kind == contract.KIND_TASK:
             act.detail = inp.get("description") or inp.get("subagent_type") or inp.get("prompt")
         elif kind == contract.KIND_READ:
-            # file_path already set; nothing else needed.
-            pass
+            # file_path already set; carry the Read-tool range so read-scan can sweep
+            # the EXACT lines read (readscan.readRange uses offset/limit when present).
+            o, lim = inp.get("offset"), inp.get("limit")
+            act.offset = o if isinstance(o, int) else None
+            act.limit = lim if isinstance(lim, int) else None
         elif kind == contract.KIND_WEB:
             act.detail = inp.get("url") or inp.get("query")
         else:

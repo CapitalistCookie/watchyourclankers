@@ -58,6 +58,23 @@ def test_parse_assistant_tool_use():
     assert bash.tool == "Bash" and bash.inp["command"] == "ls -la"
 
 
+def test_parse_read_carries_offset_limit():
+    # read-scan: a Read tool_use's offset/limit must survive into RawLine.inp so the
+    # watcher attaches them to the Activity (readRange then sweeps the EXACT lines read).
+    line = {
+        "type": "assistant", "timestamp": "2026-06-04T02:53:40.639Z", "sessionId": "s",
+        "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Read",
+             "input": {"file_path": "/x/foo.py", "offset": 100, "limit": 50}},
+        ]},
+    }
+    out = TranscriptReader.parse(line)
+    assert len(out) == 1
+    r = out[0]
+    assert r.tool == "Read" and r.file_path == "/x/foo.py"
+    assert r.inp.get("offset") == 100 and r.inp.get("limit") == 50
+
+
 def test_parse_sets_agent_id():
     line = {
         "type": "assistant", "timestamp": "2026-06-04T02:53:40Z",

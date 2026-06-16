@@ -63,6 +63,8 @@ class Activity:
     agent_id: Optional[str] = None
     file_path: Optional[str] = None
     line: Optional[int] = None
+    offset: Optional[int] = None        # read-scan: Read-tool offset (1-based first line read)
+    limit: Optional[int] = None         # read-scan: Read-tool limit (# lines read)
     hunk_old: Optional[str] = None
     hunk_new: Optional[str] = None
     detail: Optional[str] = None        # bash command / search pattern / task subject

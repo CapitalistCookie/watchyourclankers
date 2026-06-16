@@ -30,6 +30,8 @@
         "tool": {"type": "string", "description": "raw tool name e.g. Edit, Write, Bash, Grep, Task"},
         "file_path": {"type": ["string", "null"]},
         "line": {"type": ["integer", "null"], "description": "best-effort focus line for scroll-to"},
+        "offset": {"type": ["integer", "null"], "description": "read-scan: Read-tool offset (1-based first line read)"},
+        "limit": {"type": ["integer", "null"], "description": "read-scan: Read-tool limit (# lines read)"},
         "hunk_old": {"type": ["string", "null"], "description": "Edit old_string (redacted of secrets)"},
         "hunk_new": {"type": ["string", "null"], "description": "Edit new_string / Write content (redacted)"},
         "detail": {"type": ["string", "null"], "description": "bash command, search pattern, task subject, etc. (redacted)"},
