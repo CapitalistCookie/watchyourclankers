@@ -1,0 +1,27 @@
+{
+  "name": "wyc-codemirror-vendor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "One-time VENDORING build (Spec 004): esbuild bundles CodeMirror 6 into ../../web/vendor/codemirror.bundle.js. NOT a runtime build — the browser loads the committed static bundle. node_modules is gitignored; this package.json + package-lock.json + entry.mjs are the reproducible source. Rebuild: `npm ci && npm run build` (from this dir).",
+  "scripts": {
+    "build": "esbuild entry.mjs --bundle --format=esm --minify --legal-comments=none --outfile=../../web/vendor/codemirror.bundle.js"
+  },
+  "dependencies": {
+    "@codemirror/state": "^6",
+    "@codemirror/view": "^6",
+    "@codemirror/language": "^6",
+    "@codemirror/theme-one-dark": "^6",
+    "@codemirror/lang-javascript": "^6",
+    "@codemirror/lang-python": "^6",
+    "@codemirror/lang-css": "^6",
+    "@codemirror/lang-html": "^6",
+    "@codemirror/lang-json": "^6",
+    "@codemirror/lang-markdown": "^6",
+    "@codemirror/lang-rust": "^6",
+    "@codemirror/lang-yaml": "^6"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28"
+  }
+}
