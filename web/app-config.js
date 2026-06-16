@@ -97,7 +97,10 @@ export function resolveToken(opts = {}) {
   t = fromStorage();
   if (t) return t;
 
-  if (allowPrompt && hasWindow && typeof window.prompt === 'function') {
+  // Embedded under a host (e.g. clanker at /wyc/, BASE !== '/'): the host owns auth
+  // via its own session cookie, which already gates the mount — there's NO wyc token
+  // to ask for, so never prompt off the mount root (a prompt there reads as broken).
+  if (allowPrompt && BASE === '/' && hasWindow && typeof window.prompt === 'function') {
     t = window.prompt('watchyourclankers — local access token:') || '';
     if (t) persist(t);
     return t;
