@@ -24,7 +24,7 @@ Every numbered task AND every follow-up commit larger than ~2 files goes through
 
 1. **Plan note** — for anything beyond a trivial edit, a short note in the active `specs/NNN-*/` (or `docs/`) stating: Goal · Scope (IN/OUT) · files touched · contract/schema impact (yes/no) · which Principles are in play · anticipated entropy items. Spec-spine features come from `/speckit-*` (Principle VIII); a follow-up of >2 files still needs a stub note (AP-3).
 2. **Library reference** — for every NEW dependency (rare — vanilla is the default; CodeMirror 6 via CDN is the only frontend dep), pin the version and note signatures + gotchas before step 3. No REPL-probing in lieu of this (AP-5/AP-8 cousin).
-3. **Red test** — write the failing test first; run it; confirm red. Note the red in the commit body or a scratch note. (`tests/` is pytest.)
+3. **Red test** — write the failing test first; run it; confirm red. Note the red in the commit body or a scratch note. (`tests/` is pytest; **frontend/interaction behavior is `node --test web/*.test.mjs`** — extract the pure decision (e.g. `web/assign.js`) and assert it headless, because `node --check` proves syntax, *not* behavior — `docs/LESSONS.md` L1/L5.)
 4. **Green implementation** — the minimum code to pass step 3.
 5. **Full local gate** — `ci/fast.sh` must exit 0 with `[ci-fast] ALL GREEN` on the last line. Run with `set -o pipefail`; a pipe-to-`tail` exit code is **not** evidence (Principle IX / iron-law).
 6. **Entropy floor** — Pass 1: exhaustive self-triage of the diff (correctness, the protected concepts below, edge cases from the spec). Pass 2: only *new* gaps introduced by Pass-1 fixes. Pass 3+: ACCEPT or DEFER (record DEFERs as OIs). **Hard cap: 3 passes.** This is what stops "looks done" from shipping.
@@ -77,6 +77,18 @@ A wave is a slice the master plan declares. The sequence is fixed: **infra → d
 | **H19** | No observer→actor write path | Before any commit, confirm no code under `wyc/` or `hooks/` opens a write/append handle (or `.write_text`/`.write_bytes`) to `~/.claude` / `/home/user/.claude` or any observed repo. `ci/fast.sh` check (e) enforces this mechanically; H19 is the principle the check serves (Principle I) |
 
 > **H7 / H12 / H13 intentionally omitted/renumbered.** Cotton's H7 (cloud-CI poll) is replaced by the **local** post-commit FULL hook (this repo uses local CI/CD, not GitHub Actions). Cotton's H12 (upstream-V2 UI lineage) and H13 (brainstorm-SoT coverage) don't apply — the design SoT here is the constitution + master plan + the `specs/NNN-*/`; Principle VIII's spec-coverage is the analogue, enforced via H10/H11. The gate numbering keeps the cotton labels (H1–H6, H8–H11, H14–H15) so cross-repo muscle memory transfers; H16–H19 are the watchyourclankers additions.
+
+---
+
+## Remediation gates (2026-06-16, constitution v1.1.0)
+
+The framework audit (`docs/REMEDIATION.md` + `docs/LESSONS.md`) made every claimed gate real. Beyond rungs (a)–(i), `ci/fast.sh` now runs:
+
+- **(j) `node --test web/*.test.mjs`** — BEHAVIOR of pure-logic frontend modules (the rung whose absence let ghosting + drag-always-down ship). Interaction code only fans out behind one of these (Principle X).
+- **(k) `tools/check_constitution_gates.py`** — every principle names a live, resolvable enforcer; no gate may be `(planned)` (Principle IX, self-enforcing).
+- **(l) `tools/check_coverage.py`** — no orphan source; every `wyc/*.py` + `web/*.js` is governed by a spec or `docs/UX_LOG.md` (the honest two-track of Principle VIII).
+- **(m) `tools/check_handoff_fresh.py`** — `docs/HANDOFF.md`'s `HANDOFF-HEAD` tag must equal git HEAD (the handoff can't silently rot).
+- **(n) `tools/check_ledger.py`** — the closure ledger refuses green while any tracked remediation item is open (completeness is a gate, not a promise).
 
 ---
 

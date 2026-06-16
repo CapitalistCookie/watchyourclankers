@@ -35,6 +35,7 @@
 
 import mountMenu from './menu.js';
 import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js';
+import { assignSlots } from './assign.js';
 
 // persisted pane-size store key (separate from menu.js's settings blob). Holds
 // per-grid track sizes + the rail width + the chosen watch-count (watchN).
@@ -1233,79 +1234,22 @@ export function mountMosaic(rootEl, store) {
     const ranked = activeThreads();
 
     // ---- decide which threads occupy the visible tiles ----
+    // The decision is a PURE function (web/assign.js), unit-tested headless via
+    // `node --test web/assign.test.mjs` — Principle VII (bounded render: result is
+    // always ≤ slots) + Principle IX (behavior gated, not just syntax). KEY RULE:
+    // AUTO-assignment shows each PROJECT at most once ("one panel per project");
+    // explicit pins/frozen and operator-driven manual bindings may repeat.
     const slots = effSlots();
-    // pinned tiles keep their thread (if it still exists at all)
-    const visible = [];          // thread ids for tiles 0..slots-1
-    const usedThreadIds = new Set();
-
-    // 1) honor pins (and frozen snapshots): such a tile holds its current thread
-    //    and opts out of auto-rebind so its content isn't clobbered by reflow.
-    const pinnedByIdx = new Map();
-    tiles.forEach((t, i) => {
-      if ((t.pinned || t.frozen) && t.threadId && i < slots) {
-        pinnedByIdx.set(i, t.threadId);
-        usedThreadIds.add(t.threadId);
-      }
+    const editLead = primaryEditingThread(ranked);
+    const { visible, usedThreadIds: _usedList } = assignSlots({
+      slots,
+      mode,
+      ranked,
+      tiles: tiles.map((t) => ({ threadId: t.threadId, pinned: t.pinned, frozen: t.frozen })),
+      forcedThread: (menu.view && menu.view.thread) || null,
+      editLeadId: editLead ? editLead.id : null,
     });
-
-    if (mode === 'manual') {
-      // manual: keep each tile's existing thread; only fill empties with new actives.
-      for (let i = 0; i < slots; i++) {
-        const existing = tiles[i] && tiles[i].threadId;
-        const held = tiles[i] && (tiles[i].pinned || tiles[i].frozen);
-        if (existing && (ranked.some((t) => t.id === existing) || held)) {
-          visible[i] = existing; usedThreadIds.add(existing);
-        }
-      }
-      // fill empties with ranked threads not already shown
-      let ri = 0;
-      for (let i = 0; i < slots; i++) {
-        if (visible[i]) continue;
-        while (ri < ranked.length && usedThreadIds.has(ranked[ri].id)) ri++;
-        if (ri < ranked.length) { visible[i] = ranked[ri].id; usedThreadIds.add(ranked[ri].id); ri++; }
-        else visible[i] = null;
-      }
-    } else if (mode === 'per-tile') {
-      // per-tile: keep a tile's thread while it's still active; else rebind to next.
-      for (let i = 0; i < slots; i++) {
-        if (pinnedByIdx.has(i)) { visible[i] = pinnedByIdx.get(i); continue; }
-        const existing = tiles[i] && tiles[i].threadId;
-        if (existing && ranked.some((t) => t.id === existing)) { visible[i] = existing; usedThreadIds.add(existing); }
-      }
-      let ri = 0;
-      for (let i = 0; i < slots; i++) {
-        if (visible[i] !== undefined && visible[i] !== null) continue;
-        while (ri < ranked.length && usedThreadIds.has(ranked[ri].id)) ri++;
-        visible[i] = ri < ranked.length ? ranked[ri].id : null;
-        if (visible[i]) { usedThreadIds.add(visible[i]); ri++; }
-      }
-    } else {
-      // focus-follows-latest (default): tile 0 = the thread to WATCH (unless pinned),
-      // remaining tiles fill by ranked order, skipping pinned threads.
-      // tile-0 priority: an explicit URL/command thread wins; else the thread most
-      // recently GENERATING CODE (freshest edit/write) so the eye lands on code
-      // being written; else fall through to the ranked head (busy-then-recency).
-      const wanted = [];
-      const forcedThread = menu.view && menu.view.thread;
-      const editLead = primaryEditingThread(ranked);
-      if (forcedThread && ranked.some((t) => t.id === forcedThread)) {
-        wanted.push(forcedThread);
-      } else if (editLead) {
-        wanted.push(editLead.id);
-      }
-      for (const th of ranked) {
-        if (wanted.includes(th.id)) continue;
-        wanted.push(th.id);
-      }
-      // place: pinned tiles first keep theirs, then fill the rest from `wanted`.
-      let wi = 0;
-      for (let i = 0; i < slots; i++) {
-        if (pinnedByIdx.has(i)) { visible[i] = pinnedByIdx.get(i); continue; }
-        while (wi < wanted.length && usedThreadIds.has(wanted[wi])) wi++;
-        visible[i] = wi < wanted.length ? wanted[wi] : null;
-        if (visible[i]) { usedThreadIds.add(visible[i]); wi++; }
-      }
-    }
+    const usedThreadIds = new Set(_usedList);
 
     // ---- ensure we have exactly `slots` tiles ----
     while (tiles.length < slots) createTile();

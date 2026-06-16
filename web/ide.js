@@ -187,6 +187,8 @@ function hljsLineHtml(hljs, lineText, lang) {
 }
 
 import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js';
+import { termHForDrag, clampTermH } from './idegeom.js';
+import { revealFrames } from './reveal.js';
 
 const MAX_TABS = 8;
 
@@ -617,10 +619,10 @@ export function mountIdePane(mountEl, store, opts = {}) {
       editorRow = 'minmax(0, 1fr)';
       termRow = `${TERM_COLLAPSED_PX}px`;
     } else {
-      // neither collapsed: editor flexes, terminal is its dragged px (60% ceiling)
-      const maxTerm = gridH > 0 ? Math.max(TERM_H_MIN, Math.floor(gridH * TERM_FRAC_MAX)) : Infinity;
+      // neither collapsed: editor flexes, terminal is its dragged px (60% ceiling).
+      // SAME clamp as the drag (idegeom.clampTermH) so render + drag never diverge.
       editorRow = 'minmax(0, 1fr)';
-      termRow = `${clamp(termH, TERM_H_MIN, maxTerm)}px`;
+      termRow = `${clampTermH(termH, gridH, TERM_H_MIN, TERM_FRAC_MAX)}px`;
     }
     // The row-gutter folds to 0 when EITHER editor or terminal is collapsed (its
     // drag is inert anyway) so the collapsed row leaves no 6px gap.
@@ -677,17 +679,19 @@ export function mountIdePane(mountEl, store, opts = {}) {
     treeW = TREE_W_DEFAULT; applyGridTemplate(); persistLayout();
   });
 
-  // editor ↔ terminal (horizontal gutter, drag y). Dragging DOWN grows the
-  // editor / shrinks the terminal, so the terminal height moves by -dy.
+  // editor ↔ terminal (horizontal gutter, drag y). Dragging DOWN grows the editor
+  // / shrinks the terminal (terminal height moves by -dy). The geometry is the
+  // pure, unit-tested idegeom.termHForDrag so the direction can never regress to
+  // "always goes down" (R06 / LESSONS L5). onStart captures the CLAMPED STATE
+  // height — NOT a DOM measurement, which drifts by border/padding + prior
+  // clamping and is what made the drag feel "unpredictable".
   let dragStartTermH = termH;
   attachDrag(gRow, {
     axis: 'y',
-    onStart: () => { dragStartTermH = termPane.getBoundingClientRect().height; },
+    onStart: () => { dragStartTermH = clampTermH(termH, root.clientHeight || 0, TERM_H_MIN, TERM_FRAC_MAX); },
     onDelta: (dy) => {
       if (collapsed.editor || collapsed.terminal) return; // gutter inert when collapsed
-      const gridH = root.clientHeight || 0;
-      const maxTerm = gridH > 0 ? Math.max(TERM_H_MIN, Math.floor(gridH * TERM_FRAC_MAX)) : Infinity;
-      termH = clamp(dragStartTermH - dy, TERM_H_MIN, maxTerm);
+      termH = termHForDrag({ startH: dragStartTermH, dy, gridH: root.clientHeight || 0, min: TERM_H_MIN, fracMax: TERM_FRAC_MAX });
       applyGridTemplate();
     },
     onEnd: () => { persistLayout(); },
@@ -963,7 +967,14 @@ export function mountIdePane(mountEl, store, opts = {}) {
     }
 
     // Kick the reveal LAST (after layout + scroll anchor are set).
-    if (reveal) revealHunkInFallback(path, lines, codeEls, reveal, follow, myGen);
+    if (reveal) {
+      // full path: type the changed lines from EMPTY (char-level). The in-place path
+      // instead leaves the OLD content so the reveal can backspace it (deletions, R08).
+      for (let li = reveal.startIdx; li <= reveal.endIdx && li < codeEls.length; li++) {
+        if (codeEls[li]) codeEls[li].textContent = '';
+      }
+      revealHunkInFallback(path, lines, codeEls, reveal, follow, myGen);
+    }
   }
 
   // Ensure the <pre> fallback element exists + is mounted (replacing empty / CM).
@@ -1175,29 +1186,28 @@ export function mountIdePane(mountEl, store, opts = {}) {
     // hunks (split on whitespace boundaries, whitespace kept attached so words
     // "appear"); per whole line for big hunks (one chunk == the full line) so we
     // move through volume without ever dumping everything at once.
-    /** @type {{li:number, chunk:string, lineEnd:boolean}[]} */
+    /** @type {{li:number, text:string, lineEnd:boolean}[]} */
     const plan = [];
     for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) {
-      const text = lines[li] || '';
-      codeEls[li].textContent = '';                 // start the changed line empty
+      const newText = lines[li] || '';
+      // oldText = whatever is shown NOW: the IN-PLACE path left the OLD line here, so
+      // we backspace it → diff-aware DELETIONS (R08); the full path cleared it to '',
+      // so we type from empty. reveal.js (unit-tested) yields the char-by-char frames.
+      const oldText = codeEls[li] ? codeEls[li].textContent : '';
       if (byLine) {
-        plan.push({ li, chunk: text, lineEnd: true });             // whole line in one step
+        plan.push({ li, text: newText, lineEnd: true });           // big hunk: settle whole line (perf)
       } else {
-        const pieces = text.match(/\S+\s*|\s+/g) || (text ? [text] : []);
-        if (!pieces.length) { plan.push({ li, chunk: '', lineEnd: true }); }   // blank line: one empty step (carriage feel)
-        else for (let k = 0; k < pieces.length; k++) plan.push({ li, chunk: pieces[k], lineEnd: k === pieces.length - 1 });
+        const frames = revealFrames(oldText, newText);             // char-level + deletions-aware
+        if (frames.length <= 1) { plan.push({ li, text: newText, lineEnd: true }); }  // identical → settle
+        else for (let k = 1; k < frames.length; k++) plan.push({ li, text: frames[k], lineEnd: k === frames.length - 1 });
       }
     }
-    if (!plan.length) {                              // all-blank region: nothing to type
-      for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) codeEls[li].textContent = lines[li] || '';
+    if (!plan.length) {                              // nothing to do: snap to final text
+      for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) if (codeEls[li]) codeEls[li].textContent = lines[li] || '';
       fallbackRevealTimer = 0;
       removeCaret();
       return;
     }
-
-    // running plain text per line (escaped via textContent on write).
-    const built = new Map();    // li -> string revealed so far
-    const ensure = (li) => { if (!built.has(li)) built.set(li, ''); return built.get(li); };
 
     // Pace from the ADAPTIVE target: base = target/steps is the average cadence,
     // clamped to a sane per-step band. We modulate it with a gentle ease that
@@ -1221,7 +1231,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
       let d = base * easeAt(idx) * jitter() / catchUp;
       // micro-pause AFTER this step (punctuation / line break) — also scaled by
       // catchUp so accelerate-to-finish stays smooth through pauses too.
-      if (step) d += microPauseAfter(step.chunk, step.lineEnd, CADENCE) / catchUp;
+      if (step) d += microPauseAfter(step.text ? step.text.slice(-1) : '', step.lineEnd, CADENCE) / catchUp;
       return clamp(Math.round(d), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS + CADENCE.PAUSE_SENTENCE_MS);
     };
 
@@ -1254,10 +1264,8 @@ export function mountIdePane(mountEl, store, opts = {}) {
         return;
       }
       const step = plan[i];
-      const { li, chunk } = step;
-      const next = ensure(li) + chunk;
-      built.set(li, next);
-      if (codeEls[li]) codeEls[li].textContent = next;   // plain text while typing (escaped via textContent)
+      const { li, text } = step;
+      if (codeEls[li]) codeEls[li].textContent = text;   // full frame per step (ghost-free: textContent replace, never node mutation)
       // caret rides the active line (solid while typing)
       placeCaretAtLine(li);
       // when this step completes a line, settle + highlight it so revealed code

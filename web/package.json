@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "watchyourclankers frontend — ES modules, NO build step (loaded directly by the browser as <script type=module> and by `node --test` for behavioral checks). This file only declares the module system for Node; the browser ignores it."
+}

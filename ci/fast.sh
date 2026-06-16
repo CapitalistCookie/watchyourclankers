@@ -18,6 +18,13 @@
 #   (h) CSS-LOAD-CHAIN: index.html -> /static/app.js + styles.css, and styles.css
 #       @imports its sub-sheets (each @import target must exist on disk)
 #   (i) tools/check_contract.py — wire<->dataclass<->frontend parity (fail-closed)
+#   --- determinism rung (closes the "behaviorally broken but parses" hole) ---
+#   (j) node --test web/*.test.mjs — BEHAVIOR of pure-logic modules (WARN if node absent)
+#   --- meta-gates (make the framework itself honest — Principle IX) ---
+#   (k) tools/check_constitution_gates.py — every principle names a LIVE enforcer
+#   (l) tools/check_coverage.py — no orphan source (every wyc/*.py, web/*.js governed)
+#   (m) tools/check_handoff_fresh.py — docs/HANDOFF.md cited HEAD == git HEAD
+#   (n) tools/check_ledger.py — remediation ledger refuses green while any item is open
 set -euo pipefail
 
 # Resolve repo root from this script's location so it runs from anywhere.
@@ -299,6 +306,51 @@ if [ -f "tools/check_contract.py" ]; then
 else
   fail "tools/check_contract.py not found (frontend/contract gate cannot run)"
 fi
+
+# ============================================================ DETERMINISM RUNG
+# node --check (rung f) proves a frontend file PARSES; node --test proves it
+# BEHAVES. This is the rung whose absence let ghosting + drag-always-down ship to
+# main (LESSONS L1). Pure-logic modules (slot-assignment, reveal/geometry math)
+# are extracted so interaction behavior is unit-testable headless + zero-dep via
+# Node's built-in runner. WARN-not-fail only if node is absent (mirrors pytest).
+
+# --- (j) node --test web/*.test.mjs (BEHAVIOR, not just syntax) --------------
+note "(j) node --test web/*.test.mjs"
+mapfile -d '' TESTFILES < <(find web -maxdepth 1 -type f -name '*.test.mjs' -print0 2>/dev/null || true)
+if [ "${#TESTFILES[@]}" -eq 0 ]; then
+  note "  (no web/*.test.mjs yet — skipping)"
+elif command -v node >/dev/null 2>&1; then
+  node --test "${TESTFILES[@]}" || fail "node --test reported failing behavioral test(s)"
+  note "  ${#TESTFILES[@]} behavioral test file(s) passed"
+else
+  note "  WARN: node not installed — behavioral tests skipped"
+fi
+
+# ============================================================ META-GATES
+# These make the FRAMEWORK itself honest (Principle IX): no principle may claim a
+# gate that isn't live (k), no source file may float ungoverned (l), the handoff
+# doc may not rot (m), and the remediation ledger refuses green while anything is
+# open (n). See docs/REMEDIATION.md + docs/LESSONS.md (L2–L6).
+
+# --- (k) constitution gate-coverage (Principle IX self-enforcing) -----------
+note "(k) tools/check_constitution_gates.py"
+"${PY}" tools/check_constitution_gates.py || fail "a constitution principle claims an unenforced gate (Principle IX)"
+note "  every principle has a live enforcer"
+
+# --- (l) source coverage (Principle VIII — no orphan code) ------------------
+note "(l) tools/check_coverage.py"
+"${PY}" tools/check_coverage.py || fail "orphan source file(s) — not governed by a spec / UX_LOG (Principle VIII)"
+note "  no orphan source"
+
+# --- (m) handoff freshness (the doc can't silently rot) ---------------------
+note "(m) tools/check_handoff_fresh.py"
+"${PY}" tools/check_handoff_fresh.py || fail "docs/HANDOFF.md is stale (cited HEAD != actual HEAD)"
+note "  handoff current"
+
+# --- (n) remediation ledger (completeness forcing-function) -----------------
+note "(n) tools/check_ledger.py"
+"${PY}" tools/check_ledger.py || fail "remediation incomplete (docs/REMEDIATION.md has open items)"
+note "  remediation ledger fully closed"
 
 # --- all green --------------------------------------------------------------
 ELAPSED=$(( $(date +%s) - START ))

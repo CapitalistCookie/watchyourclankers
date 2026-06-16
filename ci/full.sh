@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ci/full.sh — the heavier (detached post-commit) gate. Runs the fast gate, then
 # a headless render smoke that catches "the UI doesn't paint" regressions which
-# unit tests + node --check cannot see (e.g. the index.html /static path bug).
+# unit tests + node --check cannot see (e.g. the index.html /static path bug), and
+# asserts the terminal-structure (one continuous feed, not boxed mini-panels — R07).
 # Best-effort render: skips cleanly if node/playwright/a browser is unavailable.
 set -euo pipefail
 cd "$(dirname "$0")/.."

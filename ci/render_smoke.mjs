@@ -50,6 +50,35 @@ try {
     console.error('[render-smoke] FAIL: non-CDN console errors:', JSON.stringify(realErrors.slice(0, 5)));
     process.exit(1);
   }
+
+  // R07 terminal-structure: the terminal must render as ONE CONTINUOUS shell feed
+  // (`$ cmd → output → $ cmd`), NOT a boxed/sticky mini-panel per command. Inject a
+  // representative subtree and assert the continuous-feed CSS (ide.css) is applied.
+  const term = await page.evaluate(() => {
+    const root = document.createElement('div');
+    root.className = 'ide';
+    root.style.cssText = 'position:absolute;left:-9999px;top:0';
+    root.innerHTML = '<div class="term-feed"><div class="term-block"><div class="term-cmd">' +
+      '<span class="prompt">$</span><span class="cmd">echo hi</span><span class="exit ok">exit 0</span>' +
+      '</div><pre class="term-out">hi</pre></div></div>';
+    document.body.appendChild(root);
+    const cmd = root.querySelector('.term-cmd');
+    const block = root.querySelector('.term-block');
+    const cs = getComputedStyle(cmd), bs = getComputedStyle(block);
+    const r = {
+      sticky: cs.position === 'sticky',
+      cmdBorder: parseFloat(cs.borderBottomWidth) || 0,
+      blockBorder: parseFloat(bs.borderBottomWidth) || 0,
+    };
+    root.remove();
+    return r;
+  });
+  console.log(`[render-smoke] terminal-structure: sticky=${term.sticky} cmdBorder=${term.cmdBorder} blockBorder=${term.blockBorder}`);
+  if (term.sticky || term.cmdBorder > 0 || term.blockBorder > 0) {
+    console.error('[render-smoke] FAIL: terminal renders as boxed mini-panels (R07) — must be one continuous feed');
+    process.exit(1);
+  }
+
   console.log('[render-smoke] OK');
 } finally {
   await browser.close();

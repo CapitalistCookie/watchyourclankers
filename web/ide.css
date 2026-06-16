@@ -438,15 +438,21 @@
 /* ============================================================ terminal
  * Bottom panel: void bg, mono, preserve whitespace, command lines brighter,
  * output muted, exit-code pill. Scrolls within .ide-body. */
-.term-feed { padding-bottom: 8px; }
-.ide .term-block { border-bottom: 1px solid var(--border-c); }
+/* ONE CONTINUOUS shell feed (R07): `$ cmd → output → $ cmd` in a single mono
+ * column — NOT a boxed mini-panel per command. Commands are marked by the $
+ * prompt + a blank-line gap, never by a bordered/sticky panel card. */
+.term-feed { padding: 2px 0 8px; }
+.ide .term-block { border: 0; background: none; }
+.ide .term-block + .term-block { margin-top: 9px; }   /* a blank line between commands, not a box */
 .ide .term-cmd {
   display: flex; align-items: baseline; gap: 8px;
-  padding: 5px 12px;
+  padding: 1px 12px 0;
   font-family: var(--mono); font-size: 12px;
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border-c);
-  position: sticky; top: 0; z-index: 1;
+  /* explicitly OVERRIDE the global `.term-cmd` (styles.css) which sets sticky +
+   * panel bg + border: CSS cascades PER-PROPERTY, so omitting these would let the
+   * global values leak through. Resetting them here is what makes the IDE terminal
+   * one continuous feed, not a boxed/sticky panel per command (R07). */
+  position: static; background: none; border-bottom: 0;
 }
 .ide .term-cmd .prompt { color: var(--accent-olive); font-weight: 700; }
 .ide .term-cmd .cmd { color: var(--text-primary); white-space: pre-wrap; word-break: break-all; }
@@ -456,11 +462,12 @@
 .ide .term-cmd .exit.ok  { color: var(--accent-olive); border: 1px solid var(--accent-olive); }
 .ide .term-cmd .exit.bad { color: var(--accent-red); border: 1px solid var(--accent-red); }
 .ide .term-out {
-  margin: 0; padding: 6px 12px 10px;
+  margin: 0; padding: 1px 12px 0 12px;
   font-family: var(--mono); font-size: 12px; line-height: 1.45;
   color: var(--text-secondary);
   white-space: pre-wrap; word-break: break-word;
 }
+.ide .term-out:empty { display: none; }   /* no gap before output starts streaming */
 .ide .term-cmd.flash { animation: tabflash 1s ease-out; }
 
 /* ============================================================ raw tmux screen */
