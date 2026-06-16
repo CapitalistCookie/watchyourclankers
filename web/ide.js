@@ -186,7 +186,7 @@ import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js
 import { termHForDrag, clampTermH } from './idegeom.js';
 import { revealFrames } from './reveal.js';
 import { readScanSteps, readRange } from './readscan.js';
-import { termCommandStep, termOutputTake } from './termpolicy.js';
+import { termCommandStep, termOutputTake, latestTerminalBuf } from './termpolicy.js';
 import { revealByLine } from './revealpolicy.js';
 import { cmRevealPlan } from './cmreveal.js';
 import { apiUrl } from './app-config.js';
@@ -2032,8 +2032,14 @@ export function mountIdePane(mountEl, store, opts = {}) {
     const bufs = store.terminalForSession(lead) || [];
     if (bufs.length && termEmpty.parentNode) termEmpty.remove();
 
+    // SHOW ONLY THE LATEST command (termpolicy.latestTerminalBuf, unit-tested):
+    // store.terminalForSession returns ALL buffers (uncapped), so reconciling more
+    // than the latest re-creates blocks this function intentionally evicts → the
+    // command replays "over and over" (the bug). Drive the single latest buffer;
+    // the create-branch below evicts every older block.
+    const buf = latestTerminalBuf(bufs);
     let queuedSomething = false;
-    for (const buf of bufs) {
+    if (buf) {
       let b = termBlocks.get(buf.ref_seq);
       if (!b) {
         const block = el('div', 'term-block flash');

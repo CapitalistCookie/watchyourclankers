@@ -33,3 +33,25 @@ export function termCommandStep(remaining, opts = {}) {
 export function termOutputTake(pendingLen) {
   return Math.max(0, Math.floor(pendingLen || 0));
 }
+
+/**
+ * Which terminal buffer to display: ONLY the latest command (highest ref_seq). A
+ * real terminal shows the CURRENT command + its output, not scrollback. The
+ * renderer must reconcile exactly this one buffer — `store.terminalForSession`
+ * returns ALL buffers (uncapped), so iterating them re-creates blocks the renderer
+ * already evicted, which re-types the command "over and over" (the replay bug).
+ * Pure + total: returns the highest-ref_seq buffer, or null for an empty list.
+ * @param {Array<{ref_seq?:number}>|null|undefined} bufs
+ * @returns {object|null}
+ */
+export function latestTerminalBuf(bufs) {
+  if (!Array.isArray(bufs) || bufs.length === 0) return null;
+  let latest = null;
+  for (const b of bufs) {
+    if (!b) continue;
+    const seq = typeof b.ref_seq === 'number' ? b.ref_seq : -Infinity;
+    const cur = latest && typeof latest.ref_seq === 'number' ? latest.ref_seq : -Infinity;
+    if (latest === null || seq >= cur) latest = b;
+  }
+  return latest;
+}
