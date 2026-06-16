@@ -100,6 +100,8 @@
 
 const RING = 200; // per-session bounded activity ring (Principle VI: drop-slow on edits/term)
 const SCREEN_MAX = 64; // max sessions we retain a latest-screen frame for (bounded map)
+const TERM_BUFS = 64; // per-session bounded terminal-buffer map (newest commands; the
+                      // renderer shows only the latest, older are unreachable scrollback)
 
 /** @returns {object} the store */
 export function createStore() {
@@ -200,6 +202,14 @@ export function createStore() {
         ts: 0,
       };
       perSession.set(refSeq, buf);
+      // BOUND the per-session buffer map (mirrors the activity ring / screen map):
+      // keep only the most-recent TERM_BUFS commands. Map preserves insertion order
+      // and ref_seq is monotonic, so the front keys are the oldest commands. The
+      // renderer shows only the latest, so evicted buffers are unreachable scrollback.
+      if (perSession.size > TERM_BUFS) {
+        let drop = perSession.size - TERM_BUFS;
+        for (const k of perSession.keys()) { perSession.delete(k); if (--drop <= 0) break; }
+      }
     }
     return buf;
   }
