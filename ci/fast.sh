@@ -12,6 +12,12 @@
 #   (c) contracts/events.schema.json parses as JSON
 #   (d) GUARD: no live "0.0.0.0" bind in any wyc/*.py (Principle II) — allowed only in a comment
 #   (e) GUARD: no write-path into ~/.claude / /home/user/.claude under wyc/ or hooks/ (Principle I)
+#   --- frontend rung (closes the "blank UI shipped" hole) ---
+#   (f) node --check every web/*.js (WARN-not-fail if node absent, like pytest)
+#   (g) CSS brace-balance for every web/*.css (fail on imbalance)
+#   (h) CSS-LOAD-CHAIN: index.html -> /static/app.js + styles.css, and styles.css
+#       @imports its sub-sheets (each @import target must exist on disk)
+#   (i) tools/check_contract.py — wire<->dataclass<->frontend parity (fail-closed)
 set -euo pipefail
 
 # Resolve repo root from this script's location so it runs from anywhere.
@@ -166,6 +172,133 @@ if [ -n "${ACTOR_HITS}" ]; then
   fail "observer-never-actor violation (Principle I — write-path into ~/.claude) in:${ACTOR_HITS}"
 fi
 note "  no write-path into ~/.claude"
+
+# ============================================================ FRONTEND RUNG
+# These close the "stylesheet/script silently never loaded -> blank UI" class of
+# bug that shipped a blank page, plus syntax-check the frontend like we compile
+# the backend. They run AFTER the backend checks above; all are fail-closed
+# except the node-absent path (a WARN, mirroring the pytest-absent path).
+
+# --- (f) node --check every web/*.js (WARN if node absent) -------------------
+note "(f) node --check web/*.js"
+mapfile -d '' JSFILES < <(find web -maxdepth 1 -type f -name '*.js' -print0 2>/dev/null || true)
+if [ "${#JSFILES[@]}" -eq 0 ]; then
+  note "  (no web/*.js files — skipping)"
+elif command -v node >/dev/null 2>&1; then
+  JS_BAD=""
+  for f in "${JSFILES[@]}"; do
+    # These are ES modules (top-level import/export). `node --check <file.js>`
+    # parses .js as COMMONJS, which silently tolerates some broken ESM — so we
+    # feed the source on stdin with --input-type=module to syntax-check it AS an
+    # ES module (parse only; no import resolution / no execution).
+    node --check --input-type=module < "$f" >/dev/null 2>&1 || JS_BAD="${JS_BAD} $f"
+  done
+  if [ -n "${JS_BAD}" ]; then
+    # re-run the first offender unsquelched so the error is visible in the log
+    for f in ${JS_BAD}; do node --check --input-type=module < "$f" || true; break; done
+    fail "node --check failed for:${JS_BAD}"
+  fi
+  note "  checked ${#JSFILES[@]} js file(s)"
+else
+  note "  WARN: node not installed — web/*.js syntax check skipped"
+fi
+
+# --- (g) CSS brace-balance for every web/*.css ------------------------------
+# A silently-unbalanced stylesheet is a real ship-blocker (the browser drops the
+# malformed rule and you get a half-styled or blank UI). We count { vs } AFTER
+# stripping /* comments */ and string contents so braces inside those don't skew
+# the tally. Pure-python tokenizer; fast.
+note "(g) css brace-balance web/*.css"
+mapfile -d '' CSSFILES < <(find web -maxdepth 1 -type f -name '*.css' -print0 2>/dev/null || true)
+if [ "${#CSSFILES[@]}" -eq 0 ]; then
+  note "  (no web/*.css files — skipping)"
+else
+  CSS_BAD=""
+  for f in "${CSSFILES[@]}"; do
+    if ! "${PY}" - "$f" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+# strip /* ... */ comments
+src = re.sub(r"/\*.*?\*/", "", src, flags=re.DOTALL)
+# strip quoted strings (url("..."), content: "..." etc.) so braces inside can't count
+src = re.sub(r'"(?:[^"\\]|\\.)*"', '""', src)
+src = re.sub(r"'(?:[^'\\]|\\.)*'", "''", src)
+opens = src.count("{")
+closes = src.count("}")
+sys.exit(0 if opens == closes else 1)
+PYEOF
+    then
+      CSS_BAD="${CSS_BAD} $f"
+    fi
+  done
+  if [ -n "${CSS_BAD}" ]; then
+    fail "CSS brace imbalance ({ vs }) in:${CSS_BAD}"
+  fi
+  note "  balanced ${#CSSFILES[@]} css file(s)"
+fi
+
+# --- (h) CSS-LOAD-CHAIN guard -----------------------------------------------
+# The exact bug that shipped a blank UI: the page links ONE stylesheet and that
+# sheet @imports the rest; if a link/import is dropped or its target is missing,
+# the UI silently loses its styles. Assert the whole chain is intact AND every
+# referenced file exists on disk. Fail-closed.
+note "(h) css-load-chain (index.html -> styles.css -> @imports)"
+"${PY}" - <<'PYEOF' || fail "CSS load-chain broken (see message above)"
+import os, re, sys
+WEB = "web"
+errs = []
+
+idx_path = os.path.join(WEB, "index.html")
+css_path = os.path.join(WEB, "styles.css")
+if not os.path.isfile(idx_path):
+    errs.append("web/index.html missing")
+if not os.path.isfile(css_path):
+    errs.append("web/styles.css missing")
+
+if not errs:
+    idx = open(idx_path, encoding="utf-8", errors="replace").read()
+    # index.html must load the app entry + the root stylesheet (served at /static/)
+    if not re.search(r"""src=['"]/static/app\.js['"]""", idx):
+        errs.append("index.html does not reference /static/app.js")
+    if not re.search(r"""href=['"]/static/styles\.css['"]""", idx):
+        errs.append("index.html does not reference /static/styles.css")
+
+    css = open(css_path, encoding="utf-8", errors="replace").read()
+    # collect every @import target in styles.css
+    imports = re.findall(r"""@import\s+url\(\s*['"]([^'"]+)['"]\s*\)""", css)
+    # normalize the /static/ prefix the server maps to web/
+    def to_disk(ref):
+        ref = ref.split("?", 1)[0].split("#", 1)[0]
+        ref = re.sub(r"^/static/", "", ref)
+        ref = ref.lstrip("/")
+        return os.path.join(WEB, ref)
+    # the sub-sheets we KNOW the UI depends on (mosaic + ide) MUST be imported.
+    # (resize.css is injected at runtime by resize.js, so it is NOT required here.)
+    required = {"mosaic.css", "ide.css"}
+    imported_names = {os.path.basename(to_disk(i)) for i in imports}
+    for need in sorted(required):
+        if need not in imported_names:
+            errs.append(f"styles.css does not @import {need} (UI would lose those styles)")
+    # every @import target that IS declared must exist on disk
+    for ref in imports:
+        disk = to_disk(ref)
+        if not os.path.isfile(disk):
+            errs.append(f"styles.css @imports '{ref}' but {disk} does not exist")
+
+for e in errs:
+    print(f"[ci-fast] FAIL: {e}", file=sys.stderr)
+sys.exit(1 if errs else 0)
+PYEOF
+note "  css load-chain intact (styles.css imports its sub-sheets; targets exist)"
+
+# --- (i) contract parity (wire <-> dataclasses <-> frontend) ----------------
+note "(i) tools/check_contract.py (contract parity)"
+if [ -f "tools/check_contract.py" ]; then
+  "${PY}" tools/check_contract.py || fail "contract parity check failed (tools/check_contract.py)"
+  note "  contract parity OK"
+else
+  fail "tools/check_contract.py not found (frontend/contract gate cannot run)"
+fi
 
 # --- all green --------------------------------------------------------------
 ELAPSED=$(( $(date +%s) - START ))
