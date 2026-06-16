@@ -1,4 +1,4 @@
-<!-- HANDOFF-HEAD: e69e48d -->
+<!-- HANDOFF-HEAD: 208fb39 -->
 # watchyourclankers — Session Handoff (2026-06-16, framework remediation)
 
 **Repo:** `/home/user/projects/watchyourclankers` · github.com/CapitalistCookie/watchyourclankers (public) · `main`
@@ -28,6 +28,7 @@ An audit found the constitution promised 11 live gates but ~4 were `(planned)` i
 ## Gotchas (hard-won)
 - **Port 8900** — clanker owns 8899; never bind there. The daemon serves `web/` from disk live with `Cache-Control: no-cache` (`server.py` `nocache_middleware`, `e69e48d`), so frontend edits show on a **NORMAL** refresh — no hard-refresh needed; only a **backend** change needs a daemon restart. (A "deployed but not fixed" report before that was browser heuristic-caching.)
 - **Restart safely:** `pkill -f 'm wyc serve'` self-matches the kill command's own cmdline if the launch string is in the same shell call — kill in one call (bracket trick `'[m] wyc serve'`), launch in a separate call. Relaunch: `setsid nohup env WYC_HOST=0.0.0.0 python3 -u -m wyc serve --port 8900 > /tmp/wyc_daemon.log 2>&1 < /dev/null &`.
+- **Interaction code is GATED (rung o, audit 2026-06-16):** any change to `web/{ide,mosaic,resize,debug}.js` must keep `ci/interaction.mjs` (a REAL pointer-drag DOM probe) green — the fast gate RUNS it vs a live `:8900` daemon and BLOCKS the push if a gutter drag is a no-op. A pure `node --test` (math) does NOT satisfy it (`LESSONS` L7). **`attachDrag` calls `onDelta(dx, dy)`** — a VERTICAL (`axis:'y'`) gutter MUST use the SECOND arg `dy`; binding the first arg is the wrong-arg bug that broke all 3 vertical gutters. Fix interactions RED-first against the probe + H9-enumerate every drag site.
 - **CSS cascades PER-PROPERTY** — a higher-specificity rule only wins for properties it *declares*; a duplicate global rule (`.term-cmd` in `styles.css`) leaked `position:sticky` until explicitly reset in `.ide .term-cmd`. The render-smoke caught it.
 - **`node --check` ≠ behavior** — it proves syntax; `node --test` proves behavior. Interaction bugs live in LOGIC: extract a pure module (`assign.js`/`idegeom.js`/`reveal.js`) and unit-test it.
 - **HANDOFF freshness** — see the gated tag above; regenerate it in the final commit.
