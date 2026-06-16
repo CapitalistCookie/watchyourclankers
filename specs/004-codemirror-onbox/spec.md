@@ -1,6 +1,6 @@
 # Spec 004 — CodeMirror runs ON THIS BOX (vendored, no CDN)
 
-**Status:** Specified (feasibility PROVEN) · 2026-06-16 · Master plan reference: docs/MASTER_PLAN.md (post-remediation)
+**Status:** Implemented (increments 1–4 landed, `ci/fast.sh` ALL GREEN) · 2026-06-16 · Master plan reference: docs/MASTER_PLAN.md (post-remediation)
 
 ## Problem
 The editor loads CodeMirror 6 by dynamic ESM `import()` from **esm.sh** (a CDN), per the
@@ -54,8 +54,10 @@ npx --yes esbuild entry.mjs --bundle --format=esm --minify --outfile=cm.bundle.j
   (`revealHunkInCm`) types the hunk into CM via transactions on the paced CADENCE instead of
   snapping. `ci/cm_smoke.mjs` DOM-gates it (vendored bundle imports + mounts + the real plan types
   to the exact fullDoc) — wired into `ci/full.sh` and the `ci/fast.sh` push gate.
-- **Increment 4 (remaining):** amend constitution Principle VII to permit one-time vendoring builds;
-  bump the version; re-run `tools/check_constitution_gates.py`.
+- **Increment 4 (amend):** constitution Principle VII amended (v1.2.0→**1.3.0**) — a one-time
+  VENDORING build is permitted (committed static bundle), a serve-time pipeline is not; VII gains a
+  second live enforcer `[enforcer: ci/fast.sh:cm_smoke.mjs]` so the on-box claim is itself gated.
+  `tools/check_constitution_gates.py` green (13 enforcers resolve).
 
 ## Why it's specced, not built here
 Proven feasible + fully scoped, but it's a 4-increment build that crosses the context wall; per the

@@ -1,6 +1,6 @@
 # watchyourclankers Constitution
 
-**Version**: 1.2.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-06-16
+**Version**: 1.3.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-06-16
 
 A read-only **IDE-spectator**: watch Claude Code work live, over its shoulder, across every session on this machine. The watcher observes; it never touches the work it watches. Built in clanker's idiom so it can merge into clanker later.
 
@@ -27,7 +27,7 @@ The watchable unit is a **thread of work**, not a session. Repo (clanker `resolv
 Clients hydrate from a `snapshot`, then consume the live stream by monotonic `seq`; a gap triggers `resync` → re-snapshot. Drop-slow on high-rate surfaces (terminal/edits), never on session/thread updates. *Gate (live): a forced gap recovers without a full reload. [enforcer: ci/fast.sh:pytest]*
 
 ### VII. Clanker's Idiom, Performant Beyond It
-Python + aiohttp + JSONL backend; vanilla JS + CodeMirror 6 frontend, **no build step** (CDN deps). Stay mergeable into clanker (`serve.py` routes, `/data/clanker/` SSOT, `resolve_project`). Performance is a feature: editors mount only in visible tiles; per-activity render is O(1), no full re-render. *Gate (live, v1.1.0): the mosaic binds at most `slots` tiles regardless of how many threads are active — a bounded-render unit test on the pure slot-assignment (replaces the never-built "perf smoke"). [enforcer: web/assign.test.mjs]*
+Python + aiohttp + JSONL backend; vanilla JS + CodeMirror 6 frontend, **no RUNTIME build step** — the browser loads static files directly (no webpack/bundler/transpile at serve time). *Amendment (v1.3.0):* a **one-time VENDORING build** is permitted — a dependency that cannot be fetched at runtime (this box can't reach esm.sh) may be bundled ONCE by a developer (`build/codemirror`, esbuild → a committed `web/vendor/*.bundle.js`) and served as a plain static file. The browser still loads a committed static artifact; what is forbidden is a *serve-time* pipeline, not a vendored bundle produced by a one-time build. Stay mergeable into clanker (`serve.py` routes, `/data/clanker/` SSOT, `resolve_project`). Performance is a feature: editors mount only in visible tiles; per-activity render is O(1), no full re-render. *Gate (live, v1.1.0): the mosaic binds at most `slots` tiles regardless of how many threads are active — a bounded-render unit test on the pure slot-assignment (replaces the never-built "perf smoke"). [enforcer: web/assign.test.mjs]* *Gate (live, v1.3.0): the vendored CM bundle exists + actually imports/mounts/reveals on-box, run vs the live daemon by the CM-on-box probe wired into the gate. [enforcer: ci/fast.sh:cm_smoke.mjs]*
 
 ### VIII. Spec Spine: Flow-Forward
 Every feature flows `/speckit-specify` → clarify → plan → tasks → analyze → implement into `specs/NNN-*/`. Architecture earns a spec; fast render-loop UX iteration is logged in `docs/UX_LOG.md` (the honest two-track model). Completed specs are immutable history; new requirements get a new numbered spec that supersedes. *Gate (live, v1.1.0): every source file is governed by a spec or a logged UX-iteration — no orphan code (replaces the never-built "spec-coverage check"). [enforcer: tools/check_coverage.py]*
@@ -44,4 +44,4 @@ Parent-only files: `contracts/**`, `wyc/contract.py`, this constitution, `CLAUDE
 ## Governance
 This constitution supersedes other practice in this repo. **ECC** rule packs are vendored under `ecc/` as reference taste, superseded here on conflict; the vendoring is mechanically verified so the reference is never phantom. Amend via semver bump + ratified date; dependent templates stay in sync. *Gate (live, v1.1.0): the vendored ECC rule packs exist on disk. [enforcer: ecc/RULES.md]*
 
-**Version**: 1.2.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-06-16
+**Version**: 1.3.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-06-16
