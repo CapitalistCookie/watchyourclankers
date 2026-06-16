@@ -27,8 +27,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INTERACTION_FILES = ["web/ide.js", "web/mosaic.js", "web/resize.js", "web/debug.js"]
 DOM_PROBE = "ci/interaction.mjs"
 # Tokens that prove the probe drives the REAL DOM, not just pure logic. It must
-# drive a pointer (mouse.down), target the actual gutter, and read the live layout.
-PROBE_MUST_EXERCISE = [".down(", ".ide-gutter-row", "gridTemplateRows"]
+# drive a pointer (mouse.down), target the actual resize gutters (.wyc-gutter-y —
+# every vertical gutter, not just the ide one), and read the live layout.
+PROBE_MUST_EXERCISE = [".down(", ".wyc-gutter-y", "gridTemplateRows"]
 RUN_GATE = "ci/full.sh"  # must invoke the probe so it actually runs
 
 
