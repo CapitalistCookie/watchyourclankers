@@ -11,7 +11,15 @@ echo "[ci-full] root: $ROOT"
 # 1) everything fast.sh checks must pass first.
 bash ci/fast.sh
 
-# 2) render smoke
+# 2) self-contained backend e2e (spawns its own daemon; asserts the live contract)
+if python3 -c "import aiohttp" 2>/dev/null; then
+  echo "[ci-full] backend e2e (WYC_E2E=1)"
+  WYC_E2E=1 python3 -m pytest -q tests/test_e2e.py
+else
+  echo "[ci-full] aiohttp absent — backend e2e SKIPPED"
+fi
+
+# 3) render smoke
 PORT="${WYC_FULL_PORT:-8917}"
 if command -v node >/dev/null 2>&1; then
   echo "[ci-full] render smoke on 127.0.0.1:$PORT"
