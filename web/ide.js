@@ -2049,15 +2049,21 @@ export function mountIdePane(mountEl, store, opts = {}) {
     for (const buf of bufs) {
       let b = termBlocks.get(buf.ref_seq);
       if (!b) {
-        const block = el('div', 'term-block flash');
+        // UNIFIED FEED: each command flows INLINE in one continuous shell-like
+        // column — no boxed card. `$ <cmd>` on its own line, output directly
+        // beneath, then a small dim trailing `exit N` marker at the END of the
+        // output (not a pill on the command row). Same elements/classes the
+        // reveal+reconcile logic keys off (cmdEl / outEl / exitEl); only the
+        // layout/placement changed (exit moved after the output).
+        const block = el('div', 'term-block');
         const cmd = el('div', 'term-cmd');
         cmd.append(el('span', 'prompt', '$'));
         const cmdEl = el('span', 'cmd');
         cmd.append(cmdEl);
-        const exitEl = el('span', 'exit run', '…');
-        cmd.append(exitEl);
         const outEl = el('pre', 'term-out');
-        block.append(cmd, outEl);
+        // exit marker renders compact at the tail of the command's output.
+        const exitEl = el('span', 'exit run', '…');
+        block.append(cmd, outEl, exitEl);
         termFeed.append(block);
         b = { block, cmdEl, outEl, exitEl, srcChunks: 0, targetCmd: null, cmdShown: 0, pendingOut: '', exitReady: null, done: false };
         termBlocks.set(buf.ref_seq, b);
