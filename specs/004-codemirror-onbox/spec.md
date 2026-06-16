@@ -49,6 +49,12 @@ npx --yes esbuild entry.mjs --bundle --format=esm --minify --outfile=cm.bundle.j
   (committed, ~612 KB — larger than the 356 KB proof because ide.js needs all 8 language packages).
 - **Increment 2 (wire):** `web/ide.js` imports `/static/vendor/codemirror.bundle.js` (one cached
   dynamic import) instead of esm.sh; the `<pre>` fallback stays. CM mounts on-box.
+- **Theme fix (clanker-aligned):** once CM actually mounted on-box, its `theme-one-dark` (cool grey
+  `#282c34`) clashed with the app's warm stone/terracotta palette. Replaced with a **Gruvbox-dark
+  `HighlightStyle`** (mirrors the old `<pre>` fallback's hljs theme) + a chrome theme built from the
+  app CSS vars (`--bg-deep` bg, `--fg-dim` text, `--accent` caret, `dark:true`). `theme-one-dark`
+  dropped from `build/codemirror/entry.mjs`; `@lezer/highlight` (`tags`) + `HighlightStyle` added +
+  bundle rebuilt (608 KB).
 - **Increment 3 (reveal):** `web/cmreveal.js` is the PURE reveal plan (`cmRevealPlan`, reusing
   `reveal.js`/`revealpolicy.js`), unit-tested in `web/cmreveal.test.mjs`; `web/ide.js`
   (`revealHunkInCm`) types the hunk into CM via transactions on the paced CADENCE instead of

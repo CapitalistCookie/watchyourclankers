@@ -56,7 +56,7 @@ try {
       const m = await import('/static/vendor/codemirror.bundle.js');
       out.imported = true;
       const need = ['EditorState', 'EditorView', 'Compartment', 'lineNumbers',
-                    'syntaxHighlighting', 'defaultHighlightStyle', 'oneDark',
+                    'syntaxHighlighting', 'HighlightStyle', 'tags',
                     'javascript', 'python'];
       out.exportsOk = need.every((k) => m[k] != null);
       if (!out.exportsOk) { out.error = 'missing exports: ' + need.filter((k) => m[k] == null).join(','); return out; }

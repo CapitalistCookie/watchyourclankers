@@ -715,7 +715,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
   let destroyed = false;
 
   // editor: CodeMirror handle (or null while loading / if it failed)
-  /** @type {{view:any, EditorState:any, EditorView:any, Compartment:any, langCompartment:any, baseExts:any[], oneDark:any}|null} */
+  /** @type {{view:any, EditorState:any, EditorView:any, Compartment:any, langCompartment:any, baseExts:any[]}|null} */
   let cm = null;
   let cmLoading = false;
   let cmFailed = false;
@@ -830,36 +830,63 @@ export function mountIdePane(mountEl, store, opts = {}) {
     cmLoading = true;
     try {
       // ONE dynamic import of the vendored bundle (browser-cached; the CM_LANGS
-      // factories reuse it). It re-exports every symbol the old 4 esm.sh imports
-      // provided, so the destructures below are unchanged.
+      // factories reuse it). It re-exports exactly the symbols we destructure here.
       const mod = await import(CM_BUNDLE);
       if (destroyed) { cmLoading = false; return null; }
       const { EditorState, Compartment } = mod;
       const { EditorView, lineNumbers, highlightActiveLine, drawSelection } = mod;
-      const { syntaxHighlighting, defaultHighlightStyle, foldGutter, bracketMatching } = mod;
-      const oneDark = mod.oneDark || [];
+      const { syntaxHighlighting, HighlightStyle, tags, foldGutter, bracketMatching } = mod;
       const langCompartment = new Compartment();
+
+      // CLANKER-ALIGNED syntax colours — a Gruvbox-dark HighlightStyle that mirrors
+      // the <pre> fallback's old hljs theme (warm palette on the app's stone bg), so
+      // CM matches the rest of the UI instead of CodeMirror's cool grey one-dark.
+      const t = tags;
+      const clankerHighlight = HighlightStyle.define([
+        { tag: [t.comment, t.lineComment, t.blockComment, t.docComment], color: '#665c54', fontStyle: 'italic' },
+        { tag: [t.keyword, t.controlKeyword, t.operatorKeyword, t.moduleKeyword, t.definitionKeyword, t.modifier, t.self], color: '#d3869b' },
+        { tag: [t.typeName, t.className, t.namespace], color: '#fabd2f' },
+        { tag: [t.heading, t.strong], color: '#fabd2f', fontWeight: 'bold' },
+        { tag: [t.string, t.docString, t.character, t.attributeValue, t.inserted], color: '#b8bb26' },
+        { tag: [t.number, t.integer, t.float, t.literal, t.bool, t.null, t.atom, t.constant(t.variableName), t.escape, t.color, t.unit], color: '#fe8019' },
+        { tag: [t.function(t.variableName), t.function(t.definition(t.variableName)), t.definition(t.function(t.variableName)), t.attributeName, t.propertyName, t.labelName], color: '#83a598' },
+        { tag: [t.regexp, t.quote, t.special(t.string)], color: '#8ec07c' },
+        { tag: [t.tagName, t.macroName, t.special(t.variableName)], color: '#fb4934' },
+        { tag: [t.meta, t.documentMeta, t.annotation, t.processingInstruction], color: '#d65d0e' },
+        { tag: [t.emphasis], color: '#d3869b', fontStyle: 'italic' },
+        { tag: [t.link, t.url], color: '#fe8019', textDecoration: 'underline' },
+        { tag: [t.deleted], color: '#fb4934' },
+        { tag: [t.invalid], color: '#fb4934' },
+      ]);
+
       const baseExts = [
         lineNumbers(),
         foldGutter ? foldGutter() : [],
         drawSelection ? drawSelection() : [],
         bracketMatching ? bracketMatching() : [],
         highlightActiveLine ? highlightActiveLine() : [],
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        syntaxHighlighting(clankerHighlight),
         EditorView.editable.of(false),  // READ-ONLY (Principle I — observer)
         EditorState.readOnly.of(true),
         EditorView.lineWrapping,
-        oneDark,
+        // CLANKER-ALIGNED chrome — app CSS vars (warm stone bg, terracotta caret /
+        // accent), dark:true so CM's built-in layers use dark defaults. Matches the
+        // .ide-editor panel + the old <pre> fallback (no more cool grey one-dark).
         EditorView.theme({
-          '&': { backgroundColor: 'transparent', color: 'var(--fg)' },
-          '.cm-gutters': { backgroundColor: 'var(--bg-1)', border: 'none', color: 'var(--fg-faint)' },
-          '.cm-activeLineGutter': { backgroundColor: 'var(--bg-2)' },
-        }),
+          '&': { backgroundColor: 'var(--bg-deep)', color: 'var(--fg-dim)' },
+          '.cm-content': { caretColor: 'var(--accent)' },
+          '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)' },
+          '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': { backgroundColor: 'var(--bg-surface)' },
+          '.cm-gutters': { backgroundColor: 'var(--bg-deep)', border: 'none', color: 'var(--fg-faint)' },
+          '.cm-activeLine': { backgroundColor: 'rgba(68,64,60,0.16)' },
+          '.cm-activeLineGutter': { backgroundColor: 'var(--bg-panel)', color: 'var(--fg-dim)' },
+          '.cm-foldPlaceholder': { backgroundColor: 'var(--bg-panel)', color: 'var(--fg-faint)', border: 'none' },
+        }, { dark: true }),
       ];
       const view = new EditorView({
         state: EditorState.create({ doc: '', extensions: [langCompartment.of([]), ...baseExts] }),
       });
-      cm = { view, EditorState, EditorView, Compartment, langCompartment, baseExts, oneDark };
+      cm = { view, EditorState, EditorView, Compartment, langCompartment, baseExts };
       cmLoading = false;
       return cm;
     } catch (e) {
