@@ -31,6 +31,8 @@ if command -v node >/dev/null 2>&1; then
     echo "[ci-full] FAIL: daemon did not come up on :$PORT"; exit 1
   fi
   node ci/render_smoke.mjs "$PORT"
+  echo "[ci-full] DOM-interaction probe (real pointer drag asserts gridTemplateRows changes) on :$PORT"
+  node ci/interaction.mjs "$PORT"
   kill -9 "$DPID" 2>/dev/null || true
   trap - EXIT
 else

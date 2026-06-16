@@ -689,7 +689,12 @@ export function mountIdePane(mountEl, store, opts = {}) {
   attachDrag(gRow, {
     axis: 'y',
     onStart: () => { dragStartTermH = clampTermH(termH, root.clientHeight || 0, TERM_H_MIN, TERM_FRAC_MAX); },
-    onDelta: (dy) => {
+    onDelta: (dx, dy) => {
+      // attachDrag calls onDelta(dx, dy) = (clientX-startX, clientY-startY). This is
+      // the VERTICAL gutter, so the resize delta is dy (the SECOND arg). Binding the
+      // first arg as "dy" (the original bug, preserved through R06) fed HORIZONTAL
+      // jitter into the height → the terminal never resized / moved unpredictably.
+      // A pure-math test can't see this; ci/interaction.mjs (real drag) gates it.
       if (collapsed.editor || collapsed.terminal) return; // gutter inert when collapsed
       termH = termHForDrag({ startH: dragStartTermH, dy, gridH: root.clientHeight || 0, min: TERM_H_MIN, fracMax: TERM_FRAC_MAX });
       applyGridTemplate();

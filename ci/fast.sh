@@ -25,6 +25,9 @@
 #   (l) tools/check_coverage.py — no orphan source (every wyc/*.py, web/*.js governed)
 #   (m) tools/check_handoff_fresh.py — docs/HANDOFF.md cited HEAD == git HEAD
 #   (n) tools/check_ledger.py — remediation ledger refuses green while any item is open
+#   (o) tools/check_interaction_tests.py — interaction code (ide/mosaic/resize/debug.js)
+#       REQUIRES a real DOM-interaction test (ci/interaction.mjs) wired into ci/full.sh
+#       (closes the "pure-math test satisfies the behavioral gate" bypass — audit 2026-06-16)
 set -euo pipefail
 
 # Resolve repo root from this script's location so it runs from anywhere.
@@ -351,6 +354,20 @@ note "  handoff current"
 note "(n) tools/check_ledger.py"
 "${PY}" tools/check_ledger.py || fail "remediation incomplete (docs/REMEDIATION.md has open items)"
 note "  remediation ledger fully closed"
+
+# --- (o) interaction code requires a real DOM-interaction test --------------
+note "(o) tools/check_interaction_tests.py"
+"${PY}" tools/check_interaction_tests.py || fail "interaction code without a live DOM-interaction test (audit fix)"
+note "  interaction code gated by a DOM probe"
+# best-effort: if a dev daemon is live, RUN the probe so a broken gutter drag BLOCKS
+# the push (not just post-commit). Skips clean if no daemon/node (ci/full.sh runs it then).
+if command -v node >/dev/null 2>&1 && curl -s -o /dev/null --max-time 2 "http://127.0.0.1:8900/healthz" 2>/dev/null; then
+  note "  running DOM-interaction probe vs live :8900"
+  node ci/interaction.mjs 8900 || fail "DOM-interaction probe FAILED — a gutter drag is broken (real pointer events)"
+  note "  DOM-interaction probe passed"
+else
+  note "  (no live daemon on :8900 — DOM probe deferred to ci/full.sh)"
+fi
 
 # --- all green --------------------------------------------------------------
 ELAPSED=$(( $(date +%s) - START ))

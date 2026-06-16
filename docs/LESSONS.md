@@ -42,3 +42,14 @@ DOM — the DOM is just I/O. Extracting the decision into a pure, DOM-free modul
 "I fixed everything" is unfalsifiable. **Fix:** `docs/REMEDIATION.md` carries a
 machine-readable closure ledger and `tools/check_ledger.py` keeps `ci/fast.sh` RED until
 every tracked item is closed with a live enforcer. Green *is* the proof.
+
+## L7 — A pure-logic test is NOT a behavior test for DOM/interaction code (2026-06-16, audit)
+L1 closed syntax-vs-behavior for *parsing*; the same gap reopened one layer up. A pure-logic
+`node --test` (`idegeom` math) passed while the **wiring** was dead: the terminal-drag handler
+bound `onDelta`'s FIRST arg (`dx`) on a *vertical* gutter, so the drag was a no-op — and a math
+test structurally can't see that. **Fix:** `ci/interaction.mjs` drives REAL pointer events vs the
+live daemon (asserts `gridTemplateRows` changes on a gutter drag); `tools/check_interaction_tests.py`
+(rung o) makes `ide/mosaic/resize/debug.js` unable to reach green without it. **Discipline:** an
+interaction fix lands RED-first against the DOM probe, and you H9-enumerate EVERY drag site — that
+caught the identical wrong-arg bug in `mosaic.js` + `debug.js`. *Building a harness and then not
+using it is the failure this lesson exists to prevent — the gate now forces it; it isn't optional.*

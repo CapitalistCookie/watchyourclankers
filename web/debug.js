@@ -251,7 +251,7 @@ export function mount(el_, store) {
   attachDrag(rowGutter, {
     axis: 'y',
     onStart: () => { startRow = layout.row; rowSpan = Math.max(1, root.clientHeight - GUTTER_PX); },
-    onDelta: (dy) => { layout.collapsed.ticker = false; layout.collapsed.terminal = false; applyCollapsedClass('ticker'); applyCollapsedClass('terminal'); layout.row = clampFrac(startRow + dy / rowSpan); applyLayout(); },
+    onDelta: (dx, dy) => { layout.collapsed.ticker = false; layout.collapsed.terminal = false; applyCollapsedClass('ticker'); applyCollapsedClass('terminal'); layout.row = clampFrac(startRow + dy / rowSpan); applyLayout(); },  // y-axis: vertical delta is the 2nd arg (H9)
     onEnd: () => persist(),
   });
 

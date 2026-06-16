@@ -567,7 +567,7 @@ export function mountMosaic(rootEl, store) {
         const k = trackKey();
         totalFr = normTracks((sizes[k] || {}).rows, baseH.length).reduce((s, x) => s + x, 0) || baseH.length;
       },
-      onDelta: (dy) => {
+      onDelta: (dx, dy) => {  // y-axis gutter → vertical delta is the SECOND arg (H9; same class as the ide.js terminal-drag bug)
         const a = baseH[j], b = baseH[j + 1];
         if (a == null || b == null) return;
         const minPx = TRACK_MIN_FRAC * totalPx;

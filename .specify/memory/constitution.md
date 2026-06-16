@@ -1,6 +1,6 @@
 # watchyourclankers Constitution
 
-**Version**: 1.1.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-06-16
+**Version**: 1.2.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-06-16
 
 A read-only **IDE-spectator**: watch Claude Code work live, over its shoulder, across every session on this machine. The watcher observes; it never touches the work it watches. Built in clanker's idiom so it can merge into clanker later.
 
@@ -33,7 +33,7 @@ Python + aiohttp + JSONL backend; vanilla JS + CodeMirror 6 frontend, **no build
 Every feature flows `/speckit-specify` → clarify → plan → tasks → analyze → implement into `specs/NNN-*/`. Architecture earns a spec; fast render-loop UX iteration is logged in `docs/UX_LOG.md` (the honest two-track model). Completed specs are immutable history; new requirements get a new numbered spec that supersedes. *Gate (live, v1.1.0): every source file is governed by a spec or a logged UX-iteration — no orphan code (replaces the never-built "spec-coverage check"). [enforcer: tools/check_coverage.py]*
 
 ### IX. Mechanical Gates Over Promises
-Discipline is enforced by `ci/fast.sh` + hooks, not willpower. No gate is `(planned)` — its enforcer is live before the work it governs, and `tools/check_constitution_gates.py` verifies every principle here names a resolvable enforcer. Behavior — not just syntax — is gated: `node --check` proves a file parses, `node --test` proves it behaves. "Done/green/passing" requires the matching success token in the same message (`set -o pipefail`; pipe-to-tail is not evidence). *Gate (live): `ci/fast.sh` emits `[ci-fast] ALL GREEN` only when every check passed, including the behavioral rung. [enforcer: ci/fast.sh:node --test]*
+Discipline is enforced by `ci/fast.sh` + hooks, not willpower. No gate is `(planned)` — its enforcer is live before the work it governs, and `tools/check_constitution_gates.py` verifies every principle here names a resolvable enforcer. Behavior is gated at BOTH layers: `node --check` proves a file parses, `node --test` proves pure LOGIC behaves, and `ci/interaction.mjs` (real pointer events vs the live daemon) proves the DOM actually INTERACTS — because a pure-logic test passes while the wiring is dead (LESSONS L1/L7). Interaction files (`ide/mosaic/resize/debug.js`) therefore REQUIRE the DOM test, enforced by `tools/check_interaction_tests.py` (rung o). "Done/green/passing" requires the matching success token in the same message (`set -o pipefail`; pipe-to-tail is not evidence). *Gate (live): `ci/fast.sh` emits `[ci-fast] ALL GREEN` only when every check passed, including the behavioral + DOM-interaction rungs. [enforcer: tools/check_interaction_tests.py]*
 
 ### X. Multi-Agent Discipline
 Parent-only files: `contracts/**`, `wyc/contract.py`, this constitution, `CLAUDE.md`, `docs/MASTER_PLAN.md`, `ci/**`, `tools/**`, specs. Sub-agents get an explicit disjoint allow-list per dispatch and never commit; the parent integrates and re-verifies on the merged tree. Fanout whenever it doesn't sacrifice integrity — but interaction/behavior code only fans out behind a behavioral test (Principle IX). *Gate (live): the agent/parent matrix in CLAUDE.md; parent re-runs `ci/fast.sh` post-merge. [enforcer: CLAUDE.md:Agent ↔ parent]*
@@ -44,4 +44,4 @@ Parent-only files: `contracts/**`, `wyc/contract.py`, this constitution, `CLAUDE
 ## Governance
 This constitution supersedes other practice in this repo. **ECC** rule packs are vendored under `ecc/` as reference taste, superseded here on conflict; the vendoring is mechanically verified so the reference is never phantom. Amend via semver bump + ratified date; dependent templates stay in sync. *Gate (live, v1.1.0): the vendored ECC rule packs exist on disk. [enforcer: ecc/RULES.md]*
 
-**Version**: 1.1.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-06-16
+**Version**: 1.2.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-06-16

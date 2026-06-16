@@ -46,12 +46,14 @@ proof. These enforcers persist, so the next session inherits the same forcing fu
 | R03 | docs/HANDOFF.md cited HEAD == git HEAD (handoff can't silently rot) | tools/check_handoff_fresh.py | CLOSED |
 | R04 | Behavioral test rung live — `node --test web/*.test.mjs` wired into ci/fast.sh | ci/fast.sh:node --test | CLOSED |
 | R05 | one-panel-per-project (auto-assignment dedups by project, not thread id) | web/assign.test.mjs | CLOSED |
-| R06 | editor↔terminal drag fixed (no always-goes-down; ResizeObserver can't clobber termH) | web/idegeom.test.mjs | CLOSED |
+| R06 | editor↔terminal drag fixed — gated by a REAL DOM-interaction test, not pure math (audit) | ci/interaction.mjs:gridTemplateRows | CLOSED |
 | R07 | terminal is one continuous feed, no per-command boxes, no ghosting on re-render | ci/full.sh:terminal-structure | CLOSED |
 | R08 | char-level reveal with diff-aware deletions (backspace-then-type), cadence-bounded | web/reveal.test.mjs | CLOSED |
 | R09 | ECC vendored for real (ecc/ rule packs present, referenced operationally) | ecc/RULES.md | CLOSED |
 | R10 | docs/LESSONS.md persists this project's determinism lessons in-repo | docs/LESSONS.md | CLOSED |
 | R11 | MASTER_PLAN + MODULE_BUILD_CHECKLIST reflect the UI arc + this remediation + the new gates | docs/MASTER_PLAN.md:Remediation | CLOSED |
+| R12 | DOM-interaction gate: a real pointer drag asserts the live layout changes (closes the pure-math-test bypass — audit) | ci/interaction.mjs:gridTemplateRows | CLOSED |
+| R13 | interaction code (ide/mosaic/resize/debug.js) cannot reach green without the DOM test (rung o) | ci/fast.sh:check_interaction_tests | CLOSED |
 
 <!-- LEDGER:END -->
 
