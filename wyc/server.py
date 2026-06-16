@@ -138,6 +138,23 @@ async def auth_middleware(request: web.Request, handler):
     return response
 
 
+@web.middleware
+async def nocache_middleware(request: web.Request, handler):
+    """Never serve a STALE frontend to the glass. web/ assets are edited live and
+    served from disk; without this the browser heuristically caches them, so an
+    edited mosaic.js/ide.css is invisible until a HARD refresh (this bit us
+    repeatedly — "did you deploy? it's not fixed"). `no-cache` forces the browser to
+    REVALIDATE against the ETag the static handler already sets — a 304 when
+    unchanged (cheap), a fresh 200 when a file changed — so a NORMAL refresh always
+    shows the latest. Loopback + token-gated, so caching buys nothing here anyway."""
+    resp = await handler(request)
+    try:
+        resp.headers["Cache-Control"] = "no-cache"
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        pass  # a prepared WebSocketResponse has immutable headers — fine
+    return resp
+
+
 # ── annotation / override STUB persistence (Principle I — DATA_DIR only) ──────
 def _append_jsonl(filename: str, obj: dict) -> None:
     """Append one JSON object to DATA_DIR/<filename>. Our own store ONLY."""
@@ -520,7 +537,7 @@ def build_app(watcher: Any) -> web.Application:
 
     Pure wiring — no network, no watcher.run(); tests inject a fake watcher.
     The token is loaded/created here so build_app is self-contained."""
-    app = web.Application(middlewares=[auth_middleware], client_max_size=_HOOK_MAX_BYTES)
+    app = web.Application(middlewares=[nocache_middleware, auth_middleware], client_max_size=_HOOK_MAX_BYTES)
     app[_K_WATCHER] = watcher
     app[_K_TOKEN] = load_or_create_token()
 
