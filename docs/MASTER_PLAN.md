@@ -24,6 +24,10 @@ PostToolUse hook (enrichment) ────┘
 | **W2** | `002-ide-pane` | One polished IDE-spectator pane: file tree, tabbed auto-switching CodeMirror editor, live hunk highlight, **live terminal surface**, thread-follow across handoffs | W1 feed verified live |
 | **W3** | `003-mosaic-mobile` | Dynamic tiling mosaic, sub-agent/workflow fan-out reflow, ⌘K command menu + settings, pin/freeze/flag stubs, mobile single-pane swipe, localStorage + URL state | W2 pane verified |
 
+## Status (2026-06-16) — W1 + W1.5 + W2 + W3 SHIPPED
+All waves implemented & **live-verified**: transcript feed + tmux identity/raw-screen + CodeMirror IDE pane + dynamic mosaic. UI **browser-rendered** (Playwright: 28–87 tiles, sub-agent fan-out, file tree, live terminal, redaction; 0 console errors). Specs: `001-infra-contract-feed`, `002-ide-pane`, `003-mosaic-mobile` (all Implemented). Gates: `ci/fast.sh` (87 tests) + `ci/full.sh` (render smoke). On `main`.
+Next: **W4 — merge into clanker** (seam below). Optional: vendor CodeMirror (esm.sh unreachable on-box → headless falls back to `<pre>`; real browsers load it); annotate write-path (pin/freeze/flag are read-only stubs by design).
+
 ## Merge-into-clanker seam
 Clanker is Python+aiohttp+JSONL, dashboard on :8899, SSOT `/data/clanker/`, already PTY-streams tmux. Merge path: host the `/ws` + static under clanker `serve.py`; write state under `/data/clanker/watchyourclankers/`; reuse `resolve_project(cwd)` and HMAC+TOTP auth; optionally feed the terminal surface from clanker's existing PTY capture.
 
