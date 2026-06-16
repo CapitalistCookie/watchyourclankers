@@ -13,6 +13,7 @@ changes, bump PROTOCOL_VERSION and update events.schema.json in the same change.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, asdict
 from typing import Protocol, Iterator, Iterable, Optional, Callable, Any, AsyncIterator
 
@@ -25,7 +26,7 @@ DEFAULT_PORT = 8900          # clanker dashboard owns 8899 — do not collide
 CLAUDE_HOME = "/home/user/.claude"
 SESSIONS_DIR = f"{CLAUDE_HOME}/sessions"        # <pid>.json live session registry
 PROJECTS_DIR = f"{CLAUDE_HOME}/projects"        # <slug>/<uuid>.jsonl transcripts (+ /subagents/agent-<id>.jsonl)
-DATA_DIR = "/data/clanker/watchyourclankers"    # our own state: overrides, aliases, annotations
+DATA_DIR = os.environ.get("WYC_DATA_DIR", "/data/clanker/watchyourclankers")  # our own state: overrides, aliases, annotations (WYC_DATA_DIR overrides for standalone-without-clanker / tests)
 CLANKER_PROJECTS_PY = "/home/user/projects/clanker/lib/projects.py"  # reuse resolve_project(cwd)
 
 # ---------------------------------------------------------------- activity kinds

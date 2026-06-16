@@ -48,6 +48,12 @@ _FILE_MAX_BYTES = 2 * 1024 * 1024  # /file head cap (~2 MB); larger -> truncated
 # typed app[] keys (aiohttp's recommended AppKey pattern)
 _K_WATCHER: "web.AppKey[Any]" = web.AppKey("wyc_watcher", object)
 _K_TOKEN: "web.AppKey[str]" = web.AppKey("wyc_token", str)
+_K_PREFIX: "web.AppKey[str]" = web.AppKey("wyc_prefix", str)
+
+# Sentinel for the auth seam (dual-home: standalone vs embedded-in-clanker). The
+# DEFAULT is the built-in local-token middleware; a host (clanker) passes its own
+# middleware, or None to let the PARENT app it's add_subapp'd into own auth.
+_DEFAULT_AUTH = object()
 
 
 # ── token / auth (Principle II) ──────────────────────────────────────────────
@@ -532,14 +538,39 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
 
 
 # ── app construction ─────────────────────────────────────────────────────────
-def build_app(watcher: Any) -> web.Application:
+def build_app(watcher: Any, *, auth: Any = _DEFAULT_AUTH, url_prefix: str = "") -> web.Application:
     """Construct the aiohttp app around an object implementing contract.Watcher.
 
     Pure wiring — no network, no watcher.run(); tests inject a fake watcher.
-    The token is loaded/created here so build_app is self-contained."""
-    app = web.Application(middlewares=[nocache_middleware, auth_middleware], client_max_size=_HOOK_MAX_BYTES)
+
+    Dual-home seam (merge into clanker, keep standalone — Principle II/III):
+      auth:
+        _DEFAULT_AUTH (default) — install the built-in local-token middleware
+            (standalone mode; the token is loaded/created here so build_app is
+            self-contained).
+        None — install NO wyc auth middleware. The HOST app (clanker) enforces
+            auth on the PARENT app this is `add_subapp`'d into, whose middlewares
+            also run for sub-app requests (its HMAC+TOTP covers the mount). No
+            local token is created.
+        a @web.middleware — use that middleware instead of the local-token one.
+      url_prefix: the mount path when embedded (e.g. '/wyc'), stored on the app
+        for handlers/tests. Routing under a prefix is handled by aiohttp
+        `add_subapp`; the frontend derives its own BASE from import.meta.url, so
+        no server-side URL rewriting is needed."""
+    middlewares: list = [nocache_middleware]
+    use_token_auth = auth is _DEFAULT_AUTH
+    if use_token_auth:
+        middlewares.append(auth_middleware)
+    elif auth is not None:
+        middlewares.append(auth)
+    # else auth is None -> host owns auth; install no wyc auth middleware.
+
+    app = web.Application(middlewares=middlewares, client_max_size=_HOOK_MAX_BYTES)
     app[_K_WATCHER] = watcher
-    app[_K_TOKEN] = load_or_create_token()
+    # The local token is only meaningful for the built-in auth; when the host owns
+    # auth we don't create one (avoids a needless DATA_DIR write).
+    app[_K_TOKEN] = load_or_create_token() if use_token_auth else ""
+    app[_K_PREFIX] = url_prefix
 
     app.router.add_get("/healthz", handle_healthz)
     app.router.add_get("/ws", handle_ws)
