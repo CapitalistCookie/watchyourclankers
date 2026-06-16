@@ -17,7 +17,7 @@
 `CLAUDE.md` → `.specify/memory/constitution.md` (Principles I–XI) → `wyc/contract.py` + `contracts/events.schema.json` (the seam) → `docs/MASTER_PLAN.md` (waves + D-log).
 
 ## NOT done / next session
-1. **Browser-render verification** — the mosaic/IDE were node-checked + smoke-tested only; no headless-browser test ran. **Open it in a browser and confirm it renders before trusting the UI.**
+1. **Browser-render: DONE (2026-06-16)** — headless Playwright confirms the UI paints (28–33 tiles, sub-agent fan-out, file tree, live terminal, redaction; 0 console errors). Caught + fixed a blank-UI bug (`index.html` referenced `./app.js` but the server serves `/static/`). Now gated by `ci/full.sh` render-smoke. **Caveat:** the CodeMirror editor loads from esm.sh and THIS BOX can't reach esm.sh, so headless shows the `<pre>` fallback — a real user's browser loads CM fine. Optional robustness: vendor CM to `/static/` (box can't fetch it now; also trades off the no-build-step choice).
 2. **Annotate write-path** — pin/freeze/flag emit `annotate` but the server only stubs to `DATA_DIR`; no real persistence/UI-readback yet.
 3. **Enrichment hook** — `/hook` is a no-op; the watcher lacks `ingest_hook`. The PostToolUse hook posts but isn't consumed (transcript-tail is canonical, so this is enrichment only).
 4. **W4 — merge into clanker:** host `/ws` + static under clanker `serve.py`; state under `/data/clanker/watchyourclankers/`; reuse `resolve_project` + HMAC/TOTP; optionally feed terminal from clanker's existing PTY capture.
