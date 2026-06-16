@@ -190,6 +190,7 @@ import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js
 import { termHForDrag, clampTermH } from './idegeom.js';
 import { revealFrames } from './reveal.js';
 import { readScanSteps, readRange } from './readscan.js';
+import { termCommandStep, termOutputTake } from './termpolicy.js';
 
 const MAX_TABS = 8;
 
@@ -2048,30 +2049,22 @@ export function mountIdePane(mountEl, store, opts = {}) {
     //    commands don't crawl), then 2) stream output.
     if (b.targetCmd != null && b.cmdShown < b.targetCmd.length) {
       const remaining = b.targetCmd.length - b.cmdShown;
-      // ~targetMs spread over the command length, grouped so it's never glacial.
-      const grp = overCap ? remaining : clamp(Math.ceil(remaining / 28), 1, 4) * Math.max(1, Math.round(speed));
+      // the COMMAND is typed (termpolicy.termCommandStep — grouped, like a person typing).
+      const grp = overCap ? remaining : termCommandStep(remaining, { speed: Math.round(speed) });
       b.cmdShown = Math.min(b.targetCmd.length, b.cmdShown + grp);
       b.cmdEl.textContent = b.targetCmd.slice(0, b.cmdShown);
       const perChar = clamp(targetMs / Math.max(28, b.targetCmd.length), CADENCE.STEP_FLOOR_MS, 60);
       delay = clamp(Math.round(perChar * grp / Math.max(1, speed)), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS);
     } else if (b.pendingOut.length) {
-      // stream output a LINE at a time (or a chunk if a single line is huge), so it
-      // reads like the program printing. Take through the next newline; if none yet,
-      // take a bounded slice. Over the cap, take it all.
-      let take;
-      if (overCap) {
-        take = b.pendingOut.length;
-      } else {
-        const nl = b.pendingOut.indexOf('\n');
-        if (nl >= 0) take = Math.min(nl + 1, 400 * Math.max(1, Math.round(speed)));
-        else take = Math.min(b.pendingOut.length, 200 * Math.max(1, Math.round(speed)));
-      }
+      // OUTPUT IS INSTANT (termpolicy.termOutputTake): a real terminal DUMPS output —
+      // the program prints it all at once, it is NOT typed character/line by line
+      // (operator: "the results are instant from the terminal"). Take the whole pending
+      // output in one step; only the COMMAND above is "typed".
+      const take = termOutputTake(b.pendingOut.length);
       const slice = b.pendingOut.slice(0, take);
       b.pendingOut = b.pendingOut.slice(take);
       b.outEl.append(document.createTextNode(slice));
-      // a line landed -> small carriage-feel dwell; a partial chunk -> quicker.
-      const base = slice.endsWith('\n') ? clamp(targetMs / 24, CADENCE.STEP_FLOOR_MS, 70) : CADENCE.STEP_FLOOR_MS * 2;
-      delay = clamp(Math.round(base * (1 + (Math.random() * 2 - 1) * CADENCE.JITTER) / Math.max(1, speed)), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS);
+      delay = CADENCE.STEP_FLOOR_MS;   // settle immediately; the chain moves to the next block
     } else if (b.exitReady != null && !b.done) {
       // output fully streamed: NOW apply the deferred exit pill (preserved styling).
       b.done = true;
