@@ -1,6 +1,6 @@
 # watchyourclankers — Framework Remediation (2026-06-16)
 
-**Status:** COMPLETE (all 11 items CLOSED, `ci/fast.sh` ALL GREEN) · owner CapitalistCookie · HEAD-at-open `f632b4e` · landed `3f3df9c`+handoff
+**Status:** COMPLETE (all 16 items CLOSED, `ci/fast.sh` ALL GREEN) · owner CapitalistCookie · HEAD-at-open `f632b4e` · landed `3f3df9c`+handoff · **follow-up R14–R16 (2026-06-16): harness-gap remediation — see below**
 
 ## Why this exists
 
@@ -54,8 +54,43 @@ proof. These enforcers persist, so the next session inherits the same forcing fu
 | R11 | MASTER_PLAN + MODULE_BUILD_CHECKLIST reflect the UI arc + this remediation + the new gates | docs/MASTER_PLAN.md:Remediation | CLOSED |
 | R12 | DOM-interaction gate: a real pointer drag asserts the live layout changes (closes the pure-math-test bypass — audit) | ci/interaction.mjs:gridTemplateRows | CLOSED |
 | R13 | interaction code (ide/mosaic/resize/debug.js) cannot reach green without the DOM test (rung o) | ci/fast.sh:check_interaction_tests | CLOSED |
+| R14 | handoff-freshness gate no longer FALSE-BLOCKS stacked docs-only commits (HEAD~1-only allowance generalized to "no CODE changed since the cited commit") | tools/check_handoff_fresh.py:_only_docs_since | CLOSED |
+| R15 | handoff PROSE currency is gated, not just the sha: the `constitution.md (vX.Y.Z)` marker must equal the real constitution version + every `main@<sha>` resume-pointer must be fresh (catches the "said v1.1.0 while ahead" drift) | tools/check_handoff_fresh.py:_check_prose_currency | CLOSED |
+| R16 | regenerating handoff currency is ONE command, never hand-editing the tag (kills the per-commit manual-regen friction) | tools/stamp_handoff.py | CLOSED |
 
 <!-- LEDGER:END -->
+
+## Follow-up — harness-gap remediation (2026-06-16, R14–R16)
+
+The first remediation made the gates *real*; using them all session surfaced **finickiness in the
+freshness gate itself** (operator: NONNEGOTIABLE to fix before feature work). The lesson: *a gate
+that false-FAILS is as bad as one that false-passes* — it trains a `SKIP_CI` bypass habit, which is
+how a real failure later slips through (AP-8, now `docs/LESSONS.md` L8).
+
+- **R14 — the false-block.** `check_handoff_fresh.py` demanded `cited == HEAD` and allowed only a
+  *single* HEAD~1 docs-only commit. A legitimate **chain** of docs-only commits (handoff + ledger +
+  one-liner refreshes) on the last code commit therefore false-failed and was pushed with
+  `SKIP_CI=1`. Generalised to **"no CODE changed since the cited commit"** (`_only_docs_since`:
+  `cited` is an ancestor of HEAD and every file in `cited..HEAD` is under `docs/`). Still fails the
+  instant code lands un-described; never false-blocks a docs refresh.
+- **R15 — gate the PROSE, not just the sha.** A fresh sha tag did not stop the prose drifting (it
+  claimed an old constitution version while the repo raced ahead). `_check_prose_currency` now gates
+  the `constitution.md (vX.Y.Z)` marker against the real constitution version and every `main@<sha>`
+  resume-pointer against the same freshness rule — **scoped tightly so historical mentions
+  ("1.0.0→1.1.0", quoting a past "v1.1.0") are NOT flagged** (AP-8). Tests in
+  `tests/test_handoff_fresh.py` pin both the fix and the no-false-fail.
+- **R16 — never hand-edit the tag.** Manual sha-editing every commit was the residual friction (and
+  itself a rot source). `tools/stamp_handoff.py` regenerates every marker to ground truth in one
+  command (`--check` dry-run, `--commit` lands a docs-only commit); idempotent.
+
+**Gate-ladder audit (gap #3).** Re-ran the full `ci/fast.sh` ladder at the `SKIP_CI`-bypassed HEAD
+(`5e90d96`): **only rung (m) was ever red** — rungs (a)–(l) all green there, (n)/(o) green standalone
+— so the bypass masked *nothing* but the known false-fail. Reviewed every rung for false-FAIL risk:
+(m) was the only finicky one (now fixed). Minor notes (no false-fail, left as-is): (e) write-path
+guard only matches *write* modes so a legitimate read of `SESSIONS_DIR` is fine; (l) coverage is a
+loose basename substring (false-PASS-leaning, never false-FAILs). The freshness `--check` in
+`stamp_handoff.py` is a *fixer* convenience, deliberately **not** wired as a gate (it normalises to
+exact HEAD, which would itself be finicky).
 
 ## Phases
 

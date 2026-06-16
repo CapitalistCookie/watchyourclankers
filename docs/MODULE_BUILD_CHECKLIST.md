@@ -87,7 +87,7 @@ The framework audit (`docs/REMEDIATION.md` + `docs/LESSONS.md`) made every claim
 - **(j) `node --test web/*.test.mjs`** — BEHAVIOR of pure-logic frontend modules (the rung whose absence let ghosting + drag-always-down ship). Interaction code only fans out behind one of these (Principle X).
 - **(k) `tools/check_constitution_gates.py`** — every principle names a live, resolvable enforcer; no gate may be `(planned)` (Principle IX, self-enforcing).
 - **(l) `tools/check_coverage.py`** — no orphan source; every `wyc/*.py` + `web/*.js` is governed by a spec or `docs/UX_LOG.md` (the honest two-track of Principle VIII).
-- **(m) `tools/check_handoff_fresh.py`** — `docs/HANDOFF.md`'s `HANDOFF-HEAD` tag must equal git HEAD (the handoff can't silently rot).
+- **(m) `tools/check_handoff_fresh.py`** — `docs/HANDOFF.md` must stay current: the `HANDOFF-HEAD` tag is fresh when **no CODE changed since the cited commit** (`cited == HEAD`, or every file in `cited..HEAD` is under `docs/` — so a chain of docs-only refreshes never false-blocks; R14), and the PROSE currency markers are gated too — the `constitution.md (vX.Y.Z)` marker must equal the real constitution version and every `main@<sha>` pointer must be fresh (R15; historical version mentions are NOT flagged — AP-8). Regenerate every marker in one command: `python3 tools/stamp_handoff.py` (`--check` to dry-run, `--commit` to land a docs-only commit; R16) — never hand-edit the sha.
 - **(n) `tools/check_ledger.py`** — the closure ledger refuses green while any tracked remediation item is open (completeness is a gate, not a promise).
 
 ---

@@ -53,3 +53,20 @@ live daemon (asserts `gridTemplateRows` changes on a gutter drag); `tools/check_
 interaction fix lands RED-first against the DOM probe, and you H9-enumerate EVERY drag site — that
 caught the identical wrong-arg bug in `mosaic.js` + `debug.js`. *Building a harness and then not
 using it is the failure this lesson exists to prevent — the gate now forces it; it isn't optional.*
+
+## L8 — A gate that FALSE-fails is as bad as one that false-passes (2026-06-16, harness audit)
+The handoff-freshness gate (L3) was too literal: it demanded `cited == HEAD` and allowed only a
+*single* HEAD~1 docs-only commit. But a session legitimately stacks several docs-only commits
+(handoff + ledger + one-liner refreshes) on the last code commit — and a commit can't embed its own
+sha. So a perfectly-current handoff false-failed and had to be pushed with `SKIP_CI=1`, **and**
+every commit demanded a hand-edited sha (heavy all-session friction). A bypass-by-habit is how a
+real failure later slips through. **Fix (R14):** freshness is now *"no CODE changed since the cited
+commit"* — `cited == HEAD`, or every file in `cited..HEAD` is under `docs/` (`_only_docs_since`). It
+still fails the instant code lands un-described, but never false-blocks a docs-only refresh.
+**Two corollaries:** (a) gating only the *sha* let the *prose* rot (it claimed an old constitution
+version while the repo raced ahead) → `_check_prose_currency` now gates the `constitution.md
+(vX.Y.Z)` marker + every `main@<sha>` pointer, **scoped tightly so HISTORICAL mentions
+("1.0.0→1.1.0") are not flagged** — a false-fail here would just re-teach the bypass habit (AP-8).
+(b) Manual sha-editing is itself a rot source → `tools/stamp_handoff.py` regenerates every marker in
+one command (`--check`/`--commit`). *Audit every gate for false-FAILS, not just false-passes: a
+finicky gate trains people to bypass it, which defeats the gate.*
