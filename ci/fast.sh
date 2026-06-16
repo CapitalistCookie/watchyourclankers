@@ -267,11 +267,13 @@ if not os.path.isfile(css_path):
 
 if not errs:
     idx = open(idx_path, encoding="utf-8", errors="replace").read()
-    # index.html must load the app entry + the root stylesheet (served at /static/)
-    if not re.search(r"""src=['"]/static/app\.js['"]""", idx):
-        errs.append("index.html does not reference /static/app.js")
-    if not re.search(r"""href=['"]/static/styles\.css['"]""", idx):
-        errs.append("index.html does not reference /static/styles.css")
+    # index.html must load the app entry + the root stylesheet (served at /static/).
+    # The leading slash is OPTIONAL: refs are RELATIVE ('static/app.js') so the page
+    # works both standalone (/) and embedded under clanker (/wyc/) — Spec 004/merge.
+    if not re.search(r"""src=['"]/?static/app\.js['"]""", idx):
+        errs.append("index.html does not reference static/app.js")
+    if not re.search(r"""href=['"]/?static/styles\.css['"]""", idx):
+        errs.append("index.html does not reference static/styles.css")
 
     css = open(css_path, encoding="utf-8", errors="replace").read()
     # collect every @import target in styles.css

@@ -21,6 +21,34 @@ export const TOKEN_STORAGE_KEY = 'wyc.token';
 const hasWindow = typeof window !== 'undefined';
 const hasDoc = typeof document !== 'undefined';
 
+/**
+ * The mount root the app is served under — '/' standalone, '/wyc/' when clanker
+ * `add_subapp`'s it (Spec: merge into clanker, keep standalone). Derived from THIS
+ * module's own URL (served at `<BASE>static/app-config.js`), so every same-origin
+ * URL (ws, /file, …) can be built prefix-correctly without the server rewriting
+ * anything. Falls back to '/' under node (file:// import) or if undeterminable.
+ * Always ends with '/'.
+ */
+export const BASE = (() => {
+  try {
+    const here = new URL('.', import.meta.url).pathname;   // <BASE>static/
+    const m = here.match(/^(.*\/)static\/$/);
+    if (m) return m[1];                                     // <BASE>
+  } catch (_) { /* node file:// or no import.meta — fall through */ }
+  if (hasWindow && window.location && typeof window.location.pathname === 'string') {
+    return window.location.pathname.replace(/[^/]*$/, '') || '/';  // dir of the doc
+  }
+  return '/';
+})();
+
+/**
+ * Build a same-origin HTTP URL for an app route under BASE.
+ * @param {string} path e.g. 'file' or 'hook' (leading slash optional)
+ */
+export function apiUrl(path) {
+  return BASE + String(path == null ? '' : path).replace(/^\//, '');
+}
+
 function fromQuery() {
   if (!hasWindow || !window.location) return null;
   try {
@@ -91,7 +119,7 @@ export function wsUrl(token) {
     scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
   }
   const q = token ? `?token=${encodeURIComponent(token)}` : '';
-  return `${scheme}://${host}/ws${q}`;
+  return `${scheme}://${host}${BASE}ws${q}`;
 }
 
 export function clearToken() {

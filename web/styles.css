@@ -11,8 +11,10 @@
  * their VALUES are remapped to the clanker palette. New clanker-named vars are
  * added alongside. Tabular nums wherever numbers appear. */
 
-@import url('/static/mosaic.css');
-@import url('/static/ide.css');
+/* RELATIVE @imports — resolve against THIS sheet's URL (<BASE>static/styles.css),
+ * so they work standalone (/static/…) and embedded under clanker (/wyc/static/…). */
+@import url('mosaic.css');
+@import url('ide.css');
 
 :root {
   /* ---- clanker palette (canonical names) ---- */

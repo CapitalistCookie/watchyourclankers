@@ -51,7 +51,9 @@
  * highlighted <pre>; the pane is never blank. NOT a runtime build (Principle VII):
  * the browser loads a committed static file. Rebuild: `cd build/codemirror &&
  * npm ci && npm run build`. */
-const CM_BUNDLE = '/static/vendor/codemirror.bundle.js';
+// Self-locating (relative to THIS module's URL) so it resolves under any mount
+// prefix — /static/vendor/… standalone, /wyc/static/vendor/… embedded in clanker.
+const CM_BUNDLE = new URL('./vendor/codemirror.bundle.js', import.meta.url).href;
 
 // Language extensions, lazily chosen per file-extension. Each reuses the single
 // cached bundle import; the factory args match the prior esm.sh behavior exactly.
@@ -90,8 +92,8 @@ const EXT_LANG = {
  * is an accepted trade for keeping offsetTop-per-line meaningful. */
 const HLJS_SCRIPT_ID = 'wyc-hljs-script';
 const HLJS_THEME_ID = 'wyc-hljs-theme';
-const HLJS_SCRIPT_URL = '/static/vendor/highlight.min.js';
-const HLJS_THEME_URL = '/static/vendor/hljs-theme.css';
+const HLJS_SCRIPT_URL = new URL('./vendor/highlight.min.js', import.meta.url).href;
+const HLJS_THEME_URL = new URL('./vendor/hljs-theme.css', import.meta.url).href;
 
 // file-extension -> highlight.js language name. (Distinct from EXT_LANG, which
 // maps to CodeMirror lang-package keys; hljs uses its own registry names, e.g.
@@ -187,6 +189,7 @@ import { readScanSteps, readRange } from './readscan.js';
 import { termCommandStep, termOutputTake } from './termpolicy.js';
 import { revealByLine } from './revealpolicy.js';
 import { cmRevealPlan } from './cmreveal.js';
+import { apiUrl } from './app-config.js';
 
 const MAX_TABS = 8;
 
@@ -1684,7 +1687,8 @@ export function mountIdePane(mountEl, store, opts = {}) {
     // On a forced re-fetch (live edit) add a cache-buster so the browser/proxy
     // can't hand us a stale copy of the file we just saw change.
     const b = bust ? `&_=${Date.now()}` : '';
-    return `/file?path=${encodeURIComponent(path)}${t ? `&token=${encodeURIComponent(t)}` : ''}${b}`;
+    // apiUrl() prefixes the mount BASE so /file resolves under clanker (/wyc/file).
+    return `${apiUrl('file')}?path=${encodeURIComponent(path)}${t ? `&token=${encodeURIComponent(t)}` : ''}${b}`;
   }
 
   // fetch (with cache + de-dup). force=true bypasses cache + cache-busts the URL
