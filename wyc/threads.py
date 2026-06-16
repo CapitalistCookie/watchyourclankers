@@ -256,6 +256,32 @@ class ThreadStitcher:
                     bucket["writers"].add(session_id)
                 elif not ln.is_result and kind == contract.KIND_READ:
                     bucket["readers"].add(session_id)
+            # Project inference from the files Claude actually TOUCHES. Interactive
+            # sessions launch from ~, so resolve_project(cwd) is "global" for all of
+            # them; the edited/read file paths are the reliable "which repo" signal
+            # (edits weighted over reads, so the repo you're CHANGING wins).
+            if fp and not ln.is_result and os.path.isabs(fp):
+                pk = contract.kind_for_tool(ln.tool)
+                w = 3 if pk in (contract.KIND_EDIT, contract.KIND_WRITE) else (
+                    1 if pk == contract.KIND_READ else 0)
+                if w:
+                    proj = resolve_project(os.path.dirname(fp))
+                    if proj and proj != "global":
+                        votes = rec.setdefault("proj_votes", {})
+                        votes[proj] = votes.get(proj, 0) + w
+
+    def _effective_project(self, rec: dict, s: contract.Session) -> str:
+        """The project a session is REALLY working in — from edited files, not
+        cwd. Falls back to the cwd resolver only before any project file is
+        touched."""
+        votes = rec.get("proj_votes") or {}
+        best, best_n = None, 0
+        for proj, n in votes.items():
+            if proj and proj != "global" and n > best_n:
+                best, best_n = proj, n
+        if best:
+            return best
+        return s.project if (s.project and s.project != "global") else resolve_project(s.cwd)
 
     def _canon_stem(self, stem: str) -> str:
         """Apply a sticky alias to a stem (operator alias wins)."""
@@ -270,8 +296,9 @@ class ThreadStitcher:
         """(Re)stitch ``s`` and return its thread. Idempotent per poll."""
         self._ingest_lines(s.id, recent or [])
         rec = self._sess.setdefault(s.id, {})
-        project = s.project or resolve_project(s.cwd)
+        project = self._effective_project(rec, s)
         rec["project"] = project
+        s.project = project  # reflect the file-derived project on the session/snapshot
         rec["name"] = s.name
         rec["stem"] = self._canon_stem(name_stem(s.name)) if s.name else ""
         if rec.get("first_ts") is None:
