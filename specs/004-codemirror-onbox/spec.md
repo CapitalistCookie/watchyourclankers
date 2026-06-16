@@ -54,7 +54,10 @@ npx --yes esbuild entry.mjs --bundle --format=esm --minify --outfile=cm.bundle.j
   `HighlightStyle`** (mirrors the old `<pre>` fallback's hljs theme) + a chrome theme built from the
   app CSS vars (`--bg-deep` bg, `--fg-dim` text, `--accent` caret, `dark:true`). `theme-one-dark`
   dropped from `build/codemirror/entry.mjs`; `@lezer/highlight` (`tags`) + `HighlightStyle` added +
-  bundle rebuilt (608 KB).
+  bundle rebuilt (608 KB). The theme lives in the shared pure module `web/cmtheme.js`
+  (`buildClankerHighlight`/`clankerThemeSpec`, unit-tested in `web/cmtheme.test.mjs`) so the EXACT
+  lezer-tag list is exercised by `ci/cm_smoke.mjs` against the real bundle — a typo'd/renamed tag
+  fails the gate instead of silently dropping the editor to the `<pre>` fallback.
 - **Increment 3 (reveal):** `web/cmreveal.js` is the PURE reveal plan (`cmRevealPlan`, reusing
   `reveal.js`/`revealpolicy.js`), unit-tested in `web/cmreveal.test.mjs`; `web/ide.js`
   (`revealHunkInCm`) types the hunk into CM via transactions on the paced CADENCE instead of

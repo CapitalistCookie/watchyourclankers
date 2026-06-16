@@ -51,7 +51,7 @@ try {
   // dispatch a hunk char-by-char (the increment-3 reveal shape).
   const result = await page.evaluate(async () => {
     const out = { imported: false, exportsOk: false, mounted: false, mountedText: '',
-                  revealGrew: false, revealFinalOk: false, error: null };
+                  tokenColors: 0, revealGrew: false, revealFinalOk: false, error: null };
     try {
       const m = await import('/static/vendor/codemirror.bundle.js');
       out.imported = true;
@@ -61,21 +61,32 @@ try {
       out.exportsOk = need.every((k) => m[k] != null);
       if (!out.exportsOk) { out.error = 'missing exports: ' + need.filter((k) => m[k] == null).join(','); return out; }
 
-      // MOUNT: a read-only editor that renders a doc (the static-view claim).
+      // MOUNT with the REAL clanker theme (web/cmtheme.js) built from the bundle's
+      // HighlightStyle + lezer tags — this exercises the EXACT tag list ide.js uses,
+      // so a typo'd/renamed tag throws HERE (gate fail) instead of silently dropping
+      // the live editor to the <pre> fallback. Asserts the doc renders + tokens colour.
+      const cmt = await import('/static/cmtheme.js');
+      const clankerHighlight = cmt.buildClankerHighlight(m.HighlightStyle, m.tags);
+      const py = await m.python();
       const host = document.createElement('div');
       host.style.cssText = 'position:fixed;left:-9999px;width:600px;height:400px';
       document.body.appendChild(host);
-      const startDoc = 'line one\nline two\n';
+      const startDoc = 'def greet(name):\n    return "hi " + name  # c\n';
       const view = new m.EditorView({
         parent: host,
         state: m.EditorState.create({
           doc: startDoc,
-          extensions: [m.lineNumbers(), m.EditorView.editable.of(false), m.EditorState.readOnly.of(true)],
+          extensions: [m.lineNumbers(), m.syntaxHighlighting(clankerHighlight), py,
+                       m.EditorView.theme(cmt.clankerThemeSpec, { dark: true }),
+                       m.EditorView.editable.of(false), m.EditorState.readOnly.of(true)],
         }),
       });
       const txt = () => host.querySelector('.cm-content')?.textContent ?? '';
       out.mountedText = txt();
-      out.mounted = txt().includes('line one') && txt().includes('line two');
+      out.mounted = txt().includes('greet') && txt().includes('return');
+      // the clanker highlight actually coloured tokens (>=3 distinct colours)?
+      const _cols = [...host.querySelectorAll('.cm-line span')].map((s) => getComputedStyle(s).color);
+      out.tokenColors = new Set(_cols.filter(Boolean)).size;
 
       // REVEAL via the REAL pure plan (web/cmreveal.js) applied through CM
       // transactions EXACTLY as ide.js does: setState(initialDoc), then replace the
@@ -114,6 +125,7 @@ try {
   if (!result.imported) fail('vendored bundle did not import in the browser');
   if (!result.exportsOk) fail('bundle missing required CM exports');
   if (!result.mounted) fail(`EditorView did not render its doc (.cm-content="${result.mountedText}")`);
+  if (result.tokenColors < 3) fail(`clanker highlight coloured only ${result.tokenColors} distinct token colour(s) — the real tag list may be broken`);
   if (!result.revealGrew) fail('char-by-char dispatch did not grow .cm-content monotonically (CM snapped?)');
   if (!result.revealFinalOk) fail('reveal did not end with the full hunk text');
 
@@ -121,7 +133,7 @@ try {
   if (errors.length) fail(`console errors during CM mount: ${errors.slice(0, 3).join(' | ')}`);
 
   if (!failed) {
-    console.log(`[cm-smoke] OK: vendored CM imported + mounted (rendered doc) + revealed a hunk char-by-char on-box (0 console errors)`);
+    console.log(`[cm-smoke] OK: vendored CM imported + mounted with the real clanker theme (${result.tokenColors} token colours) + revealed a hunk char-by-char on-box (0 console errors)`);
   }
 } catch (e) {
   fail(String(e && e.stack || e));

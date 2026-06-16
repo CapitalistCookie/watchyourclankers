@@ -190,6 +190,7 @@ import { termCommandStep, termOutputTake } from './termpolicy.js';
 import { revealByLine } from './revealpolicy.js';
 import { cmRevealPlan } from './cmreveal.js';
 import { apiUrl } from './app-config.js';
+import { buildClankerHighlight, clankerThemeSpec } from './cmtheme.js';
 
 const MAX_TABS = 8;
 
@@ -841,26 +842,11 @@ export function mountIdePane(mountEl, store, opts = {}) {
       const { syntaxHighlighting, HighlightStyle, tags, foldGutter, bracketMatching } = mod;
       const langCompartment = new Compartment();
 
-      // CLANKER-ALIGNED syntax colours — a Gruvbox-dark HighlightStyle that mirrors
-      // the <pre> fallback's old hljs theme (warm palette on the app's stone bg), so
-      // CM matches the rest of the UI instead of CodeMirror's cool grey one-dark.
-      const t = tags;
-      const clankerHighlight = HighlightStyle.define([
-        { tag: [t.comment, t.lineComment, t.blockComment, t.docComment], color: '#665c54', fontStyle: 'italic' },
-        { tag: [t.keyword, t.controlKeyword, t.operatorKeyword, t.moduleKeyword, t.definitionKeyword, t.modifier, t.self], color: '#d3869b' },
-        { tag: [t.typeName, t.className, t.namespace], color: '#fabd2f' },
-        { tag: [t.heading, t.strong], color: '#fabd2f', fontWeight: 'bold' },
-        { tag: [t.string, t.docString, t.character, t.attributeValue, t.inserted], color: '#b8bb26' },
-        { tag: [t.number, t.integer, t.float, t.literal, t.bool, t.null, t.atom, t.constant(t.variableName), t.escape, t.color, t.unit], color: '#fe8019' },
-        { tag: [t.function(t.variableName), t.function(t.definition(t.variableName)), t.definition(t.function(t.variableName)), t.attributeName, t.propertyName, t.labelName], color: '#83a598' },
-        { tag: [t.regexp, t.quote, t.special(t.string)], color: '#8ec07c' },
-        { tag: [t.tagName, t.macroName, t.special(t.variableName)], color: '#fb4934' },
-        { tag: [t.meta, t.documentMeta, t.annotation, t.processingInstruction], color: '#d65d0e' },
-        { tag: [t.emphasis], color: '#d3869b', fontStyle: 'italic' },
-        { tag: [t.link, t.url], color: '#fe8019', textDecoration: 'underline' },
-        { tag: [t.deleted], color: '#fb4934' },
-        { tag: [t.invalid], color: '#fb4934' },
-      ]);
+      // CLANKER-ALIGNED theme (shared cmtheme.js → the exact tag list is gated by
+      // ci/cm_smoke.mjs against the real bundle): a Gruvbox-dark HighlightStyle that
+      // mirrors the old <pre> fallback (warm, matches the app) + chrome from the app
+      // CSS vars — not CodeMirror's cool grey one-dark.
+      const clankerHighlight = buildClankerHighlight(HighlightStyle, tags);
 
       const baseExts = [
         lineNumbers(),
@@ -872,19 +858,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
         EditorView.editable.of(false),  // READ-ONLY (Principle I — observer)
         EditorState.readOnly.of(true),
         EditorView.lineWrapping,
-        // CLANKER-ALIGNED chrome — app CSS vars (warm stone bg, terracotta caret /
-        // accent), dark:true so CM's built-in layers use dark defaults. Matches the
-        // .ide-editor panel + the old <pre> fallback (no more cool grey one-dark).
-        EditorView.theme({
-          '&': { backgroundColor: 'var(--bg-deep)', color: 'var(--fg-dim)' },
-          '.cm-content': { caretColor: 'var(--accent)' },
-          '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)' },
-          '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': { backgroundColor: 'var(--bg-surface)' },
-          '.cm-gutters': { backgroundColor: 'var(--bg-deep)', border: 'none', color: 'var(--fg-faint)' },
-          '.cm-activeLine': { backgroundColor: 'rgba(68,64,60,0.16)' },
-          '.cm-activeLineGutter': { backgroundColor: 'var(--bg-panel)', color: 'var(--fg-dim)' },
-          '.cm-foldPlaceholder': { backgroundColor: 'var(--bg-panel)', color: 'var(--fg-faint)', border: 'none' },
-        }, { dark: true }),
+        EditorView.theme(clankerThemeSpec, { dark: true }),  // dark:true → CM dark defaults
       ];
       const view = new EditorView({
         state: EditorState.create({ doc: '', extensions: [langCompartment.of([]), ...baseExts] }),

@@ -117,6 +117,32 @@ def test_url_prefix_recorded(isolated_data_dir):
     assert build_app(object())[_K_PREFIX] == ""
 
 
+def test_embedded_under_parent_subapp(isolated_data_dir):
+    """The actual clanker mount (M2 mechanism), proven without clanker: a PARENT app
+    with its OWN auth `add_subapp`'s wyc at /wyc/. aiohttp runs the parent's
+    middleware for sub-app requests, so the host owns auth on the whole mount, and
+    wyc's routes (healthz / index / static) serve correctly UNDER the prefix."""
+    @web.middleware
+    async def parent_auth(request, handler):
+        if request.query.get("k") == "secret":
+            return await handler(request)
+        return web.Response(status=401, text="parent auth")
+
+    def make():
+        parent = web.Application(middlewares=[parent_auth])
+        wyc_app = build_app(object(), auth=None, url_prefix="/wyc")
+        parent.add_subapp("/wyc/", wyc_app)
+        return parent
+
+    # the parent's auth covers the mount: no key -> 401 even on wyc's unauth /healthz.
+    assert _run(_statuses(make(), ["/wyc/healthz"])) == [401]
+    # with the parent key -> wyc serves healthz + the index + static under /wyc/.
+    got = _run(_statuses(make(), [
+        "/wyc/healthz?k=secret", "/wyc/?k=secret", "/wyc/static/app.js?k=secret",
+    ]))
+    assert got == [200, 200, 200], got
+
+
 # ── data-dir seam ──────────────────────────────────────────────────────────────
 # Run in a SUBPROCESS so the env is read at a fresh import — no in-process
 # importlib.reload (reloading the module swaps module-level singletons like the
