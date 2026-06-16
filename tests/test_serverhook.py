@@ -236,6 +236,22 @@ def test_index_rejected_without_token():
     _run(go())
 
 
+def test_responses_carry_no_cache_header():
+    # nocache_middleware (deterministic counterpart to the fast-gate curl probe):
+    # every response carries Cache-Control: no-cache so the browser revalidates and
+    # never serves a stale frontend (the "deployed but not fixed" class). /healthz
+    # needs no token, so it is the simplest probe.
+    async def go():
+        client, _ = await _make_client(FakeWatcher())
+        try:
+            resp = await client.get("/healthz")
+            assert resp.headers.get("Cache-Control") == "no-cache", \
+                f"missing no-cache: {resp.headers.get('Cache-Control')!r}"
+        finally:
+            await client.close()
+    _run(go())
+
+
 def test_ws_with_token_sends_hello_then_snapshot_then_stream():
     async def go():
         watcher = FakeWatcher()
