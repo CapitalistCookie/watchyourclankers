@@ -470,6 +470,15 @@
 .ide .term-out:empty { display: none; }   /* no gap before output starts streaming */
 .ide .term-cmd.flash { animation: tabflash 1s ease-out; }
 
+/* read-scan: a transient "reading" highlight sweeping down the lines Claude is
+ * reading (readscan.js + sweepReadFallback). Olive accent + left rule, distinct
+ * from the amber edit-flash / terracotta typing caret — this is reading, not typing. */
+.ide .editor-fallback .efline.ef-reading {
+  background: rgba(132, 145, 79, .14);
+  box-shadow: inset 2px 0 0 var(--accent-olive);
+  transition: background .12s ease;
+}
+
 /* ============================================================ raw tmux screen */
 .ide-screen {
   position: absolute; inset: 0; z-index: 20;

@@ -189,6 +189,7 @@ function hljsLineHtml(hljs, lineText, lang) {
 import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js';
 import { termHForDrag, clampTermH } from './idegeom.js';
 import { revealFrames } from './reveal.js';
+import { readScanSteps, readRange } from './readscan.js';
 
 const MAX_TABS = 8;
 
@@ -1381,8 +1382,9 @@ export function mountIdePane(mountEl, store, opts = {}) {
 
   // Set the editor's document to `content` for `path`, choose the language, then
   // (optionally) scroll-to + flash the hunk line, and typewriter-reveal newHunk.
-  async function showFileInEditor(path, content, focusLine, hunkNew, follow) {
+  async function showFileInEditor(path, content, focusLine, hunkNew, follow, scanRead) {
     const myToken = ++fetchToken;
+    cancelReadScan();                         // a new render supersedes any read-sweep
     const doc = String(content == null ? '' : content);
     // LOCATE the change ourselves (Activity.line is usually null): match the
     // first substantive line of hunk_new in the freshly-fetched content. The
@@ -1396,6 +1398,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
 
     if (cmFailed || !cm) {
       renderFallback(path, doc, targetLine, follow, hunkNew);
+      if (scanRead) sweepReadFallback(doc, scanRead);
       return;
     }
     attachCmDom();
@@ -1411,6 +1414,39 @@ export function mountIdePane(mountEl, store, opts = {}) {
     if (targetLine && targetLine > 0) {
       flashAndScrollCm(targetLine, hunkNew, follow);
     }
+  }
+
+  // ---- read-scan sweep (fallback only) --------------------------------------
+  let readScanTimer = 0;
+  function cancelReadScan() {
+    if (readScanTimer) { try { clearTimeout(readScanTimer); } catch (_) {} readScanTimer = 0; }
+    if (fallbackEl) for (const n of fallbackEl.querySelectorAll('.efline.ef-reading')) n.classList.remove('ef-reading');
+  }
+  // Sweep a transient "reading" highlight DOWN the read range (readscan.js schedule),
+  // scroll-following, then clear. Distinct from the edit reveal: no typing, no caret —
+  // it shows Claude reading. Fallback-only (CM isn't loadable on every box).
+  function sweepReadFallback(doc, act) {
+    cancelReadScan();
+    if (!fallbackEl || !fallbackCodeEls.length) return;
+    const total = (fallbackLines && fallbackLines.length) || String(doc).split('\n').length;
+    const { start, end } = readRange(act, total, { window: 40 });
+    const steps = readScanSteps(start, end, { maxSteps: 80 });
+    const stepMs = clamp(Math.round(adaptiveRevealMs() / Math.max(1, steps.length)), 16, 90);
+    let i = 0;
+    const tick = () => {
+      if (destroyed || !fallbackEl) { readScanTimer = 0; return; }
+      for (const n of fallbackEl.querySelectorAll('.efline.ef-reading')) n.classList.remove('ef-reading');
+      const code = fallbackCodeEls[steps[i] - 1];
+      const lineEl = code && code.parentNode;
+      if (lineEl) {
+        lineEl.classList.add('ef-reading');
+        if (!followPaused) scrollFallbackToLine(steps[i], false);
+      }
+      i++;
+      if (i < steps.length) readScanTimer = setTimeout(tick, stepMs);
+      else readScanTimer = setTimeout(cancelReadScan, 500);   // linger, then clear
+    };
+    readScanTimer = setTimeout(tick, 0);
   }
 
   // Scroll to a line in CM (when following), and add a transient flash
@@ -1614,10 +1650,11 @@ export function mountIdePane(mountEl, store, opts = {}) {
     const force = !!opts2.force;
     const hunkNew = opts2.hunkNew || null;
     const follow = !!opts2.follow;
+    const scanRead = opts2.scanRead || null;
     fetchFile(path, force).then((rec) => {
       if (destroyed || activeTab !== path) return; // user/auto moved on
       updateEditorMeta(path, rec);
-      showFileInEditor(path, rec.content, focusLine, hunkNew, follow);
+      showFileInEditor(path, rec.content, focusLine, hunkNew, follow, scanRead);
     });
   }
 
@@ -2156,6 +2193,26 @@ export function mountIdePane(mountEl, store, opts = {}) {
   }
 
   /* ==================================================================== auto-switch */
+  // read-scan: when nothing is being EDITED, a new READ is worth showing — open the
+  // read file and sweep a "reading" highlight through it (a reading indicator, not
+  // typing). Reads are frequent, so edits always win (checked first); reads fill the
+  // gaps. Pure schedule = readscan.js (node --tested); the sweep is fallback-only.
+  let lastReadSeq = 0;
+  function maybeScanRead(ring, newest) {
+    if (pinned) return;                       // operator pinned a file — don't hijack
+    let readT = null;
+    for (let i = ring.length - 1; i >= 0; i--) {
+      const a = ring[i];
+      if (typeof a.seq !== 'number' || a.seq <= lastReadSeq) break;
+      if (a.kind === 'read' && a.file_path) { readT = a; break; }
+    }
+    if (newest && typeof newest.seq === 'number') lastReadSeq = Math.max(lastReadSeq, newest.seq);
+    if (!readT) return;
+    followPaused = false; hideFollowChip();
+    const line = (typeof readT.line === 'number' && readT.line > 0) ? readT.line : 0;
+    openFile(readT.file_path, line, { follow: true, scanRead: readT });
+  }
+
   // React to the lead session's newest edit/write: switch tab, scroll, flash.
   function handleAutoSwitch() {
     const lead = leadSessionId();
@@ -2173,7 +2230,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     // ever react to genuinely-new edits (even if `target` is null this tick)
     const newest = ring[ring.length - 1];
     if (newest && typeof newest.seq === 'number') lastEditSeq = Math.max(lastEditSeq, newest.seq);
-    if (!target) return;
+    if (!target) { maybeScanRead(ring, newest); return; }
 
     // If the operator pinned a different file, resume auto-follow once Claude
     // edits a file again (pin yields to live activity, per spec: "pins until
