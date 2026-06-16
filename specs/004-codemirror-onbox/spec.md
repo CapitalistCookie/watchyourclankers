@@ -43,6 +43,20 @@ npx --yes esbuild entry.mjs --bundle --format=esm --minify --outfile=cm.bundle.j
 - **Contract:** no wire change (CM is frontend rendering only) — Principle III unaffected.
 - **Coverage:** `web/vendor/**` is excluded (like the hljs vendor); the `ide.js` changes stay governed.
 
+## As-built (increments landed — 2026-06-16)
+- **Increment 1 (vendor):** `build/codemirror/{entry.mjs,package.json,package-lock.json}` is the one-time
+  esbuild vendoring recipe (`npm ci && npm run build`); it emits `web/vendor/codemirror.bundle.js`
+  (committed, ~612 KB — larger than the 356 KB proof because ide.js needs all 8 language packages).
+- **Increment 2 (wire):** `web/ide.js` imports `/static/vendor/codemirror.bundle.js` (one cached
+  dynamic import) instead of esm.sh; the `<pre>` fallback stays. CM mounts on-box.
+- **Increment 3 (reveal):** `web/cmreveal.js` is the PURE reveal plan (`cmRevealPlan`, reusing
+  `reveal.js`/`revealpolicy.js`), unit-tested in `web/cmreveal.test.mjs`; `web/ide.js`
+  (`revealHunkInCm`) types the hunk into CM via transactions on the paced CADENCE instead of
+  snapping. `ci/cm_smoke.mjs` DOM-gates it (vendored bundle imports + mounts + the real plan types
+  to the exact fullDoc) — wired into `ci/full.sh` and the `ci/fast.sh` push gate.
+- **Increment 4 (remaining):** amend constitution Principle VII to permit one-time vendoring builds;
+  bump the version; re-run `tools/check_constitution_gates.py`.
+
 ## Why it's specced, not built here
 Proven feasible + fully scoped, but it's a 4-increment build that crosses the context wall; per the
 harness discipline (don't ship a half-built interaction layer, don't stop mid-build), it gets a clean

@@ -186,6 +186,7 @@ import { revealFrames } from './reveal.js';
 import { readScanSteps, readRange } from './readscan.js';
 import { termCommandStep, termOutputTake } from './termpolicy.js';
 import { revealByLine } from './revealpolicy.js';
+import { cmRevealPlan } from './cmreveal.js';
 
 const MAX_TABS = 8;
 
@@ -726,6 +727,10 @@ export function mountIdePane(mountEl, store, opts = {}) {
   let fallbackHlGen = 0;
   // FEATURE B: handle for the in-flight hunk-reveal timer (so we can cancel it).
   let fallbackRevealTimer = 0;
+  // Spec 004 increment 3: handle for the in-flight CM hunk-reveal timer (the CM
+  // analogue of fallbackRevealTimer — CM TYPES the hunk in via transactions
+  // instead of snapping the whole doc). Cancelled when a newer render supersedes.
+  let cmRevealTimer = 0;
   // FEATURE B (caret): a single reusable blinking-caret span. While a reveal is
   // running it sits inline at the active typing position; when the reveal finishes
   // it stays (blinking) at the last-typed spot so an idle gap looks like a paused
@@ -1401,13 +1406,103 @@ export function mountIdePane(mountEl, store, opts = {}) {
     if (destroyed || myToken !== fetchToken) return;
 
     const { view, EditorState, langCompartment, baseExts } = cm;
-    // full reset of doc + language (cheap; we only do this on a file switch / re-edit)
-    view.setState(EditorState.create({ doc, extensions: [langCompartment.of(langExt), ...baseExts] }));
+    cancelCmReveal();   // a newer render supersedes any in-flight reveal
 
-    // scroll to + flash the changed line (auto-follow honors the pause state)
+    // Spec 004 increment 3: a live FOLLOW-edit with a real hunk TYPES the hunk into
+    // CM char-by-char (reveal) instead of snapping the whole doc in. A file switch /
+    // paused-follow / no-hunk render snaps (cheap + correct). Same hunk-range math
+    // as the fallback path (renderFallback), so both surfaces agree on the region.
+    const wantReveal = follow && !followPaused && targetLine > 0 &&
+                       typeof hunkNew === 'string' && hunkNew.trim();
+    if (wantReveal) {
+      const docLines = doc.split('\n');
+      const startIdx = Math.max(0, Math.min(targetLine - 1, docLines.length - 1));
+      const hunkLineCount = hunkNew.replace(/\n+$/, '').split('\n').length;
+      const endIdx = Math.max(startIdx, Math.min(startIdx + hunkLineCount - 1, docLines.length - 1));
+      const plan = cmRevealPlan(doc, startIdx + 1, endIdx + 1);   // pure + unit-tested
+      if (plan.steps.length) {
+        revealHunkInCm(plan, langExt, path, hunkNew, follow, targetLine, myToken);
+        return;
+      }
+    }
+
+    // SNAP: full reset of doc + language (file switch / re-edit / non-follow).
+    view.setState(EditorState.create({ doc, extensions: [langCompartment.of(langExt), ...baseExts] }));
     if (targetLine && targetLine > 0) {
       flashAndScrollCm(targetLine, hunkNew, follow);
     }
+  }
+
+  // Cancel any in-flight CM hunk-reveal (Spec 004 increment 3). The token check in
+  // tick() also aborts it on the next step; this clears the pending timer at once so
+  // nothing dispatches into a superseded/destroyed view.
+  function cancelCmReveal() {
+    if (cmRevealTimer) { try { clearTimeout(cmRevealTimer); } catch (_) {} cmRevealTimer = 0; }
+  }
+
+  // TYPE a freshly-landed hunk INTO CodeMirror char-by-char (Spec 004 increment 3),
+  // the CM analogue of revealHunkInFallback. The PLAN (which chars, in what order,
+  // and the doc-with-region-emptied to start from) is the pure, unit-tested
+  // cmRevealPlan; here we only DRIVE it: mount initialDoc, then dispatch each step
+  // as a CM transaction on a paced timer (same CADENCE as the fallback). CM accepts
+  // programmatic dispatch even though the view is editable:false (Principle I —
+  // still observer-only; the user can't type). A newer render cancels via the token.
+  function revealHunkInCm(plan, langExt, path, hunkNew, follow, targetLine, myToken) {
+    if (!cm) return;
+    const { view, EditorState, EditorView, langCompartment, baseExts } = cm;
+    // mount the surrounding document with the hunk region EMPTY (+ language), then
+    // grow the region back to full text step-by-step so CM types instead of snaps.
+    view.setState(EditorState.create({
+      doc: plan.initialDoc, extensions: [langCompartment.of(langExt), ...baseExts],
+    }));
+
+    const steps = plan.steps;
+    const nSteps = steps.length;
+    revealTargetMs = adaptiveRevealMs();
+    const base = clamp(revealTargetMs / Math.max(1, nSteps), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS);
+    const easeAt = (idx) => {
+      const t = nSteps > 1 ? idx / (nSteps - 1) : 1;
+      return CADENCE.EASE_IN + (CADENCE.EASE_OUT - CADENCE.EASE_IN) * t;
+    };
+    const jitter = () => 1 + (Math.random() * 2 - 1) * CADENCE.JITTER;
+    const delayFor = (idx, step) => {
+      let d = base * easeAt(idx) * jitter();
+      if (step) d += microPauseAfter(step.slice(-1), step.endsWith('\n'), CADENCE);
+      return clamp(Math.round(d), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS + CADENCE.PAUSE_SENTENCE_MS);
+    };
+
+    let i = 0, prev = 0, lastLine = -1;
+    const tick = () => {
+      // aborted by a newer render / teardown / file-switch?
+      if (destroyed || myToken !== fetchToken || !cm) { cmRevealTimer = 0; return; }
+      if (i >= nSteps) {                    // done — settle: flash + scroll the hunk
+        cmRevealTimer = 0;
+        if (targetLine > 0) flashAndScrollCm(targetLine, hunkNew, follow);
+        return;
+      }
+      const step = steps[i];
+      // replace the growing region [from, from+prev] with the next frame
+      try { view.dispatch({ changes: { from: plan.from, to: plan.from + prev, insert: step } }); } catch (_) {}
+      prev = step.length;
+      // FOLLOW the typing — but only re-scroll when the active LINE changes (not per
+      // char) so we don't thrash the scroller on a long hunk.
+      if (follow && !followPaused) {
+        try {
+          const endPos = Math.min(plan.from + prev, view.state.doc.length);
+          const ln = view.state.doc.lineAt(endPos).number;
+          if (ln !== lastLine) {
+            lastLine = ln; lastFollowLine = ln;
+            suppressScrollWatch = true;
+            view.dispatch({ effects: EditorView.scrollIntoView(view.state.doc.line(ln).from, { y: 'center' }) });
+            setTimeout(() => { suppressScrollWatch = false; }, 60);
+          }
+        } catch (_) {}
+      }
+      i++;
+      cmRevealTimer = setTimeout(tick, delayFor(i, steps[i]));
+    };
+    cancelCmReveal();
+    cmRevealTimer = setTimeout(tick, delayFor(0, steps[0]));
   }
 
   // ---- read-scan sweep (fallback only) --------------------------------------
@@ -2307,6 +2402,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     if (layoutRO) { try { layoutRO.disconnect(); } catch (_) {} layoutRO = null; }
     if (followRAF) { try { cancelAnimationFrame(followRAF); } catch (_) {} followRAF = 0; }
     cancelFallbackReveal();          // stop any in-flight typewriter reveal (FEATURE B)
+    cancelCmReveal();                // stop any in-flight CM hunk-reveal (Spec 004)
     cancelTermReveal();              // stop the terminal reveal chain (FEATURE B #4)
     if (rawOn) {
       const client = getClient();

@@ -77,22 +77,31 @@ try {
       out.mountedText = txt();
       out.mounted = txt().includes('line one') && txt().includes('line two');
 
-      // REVEAL: append a hunk ONE CHAR at a time via transactions on the read-only
-      // doc (programmatic dispatch is allowed even when editable:false). The
-      // rendered text must GROW monotonically and end with the full hunk — i.e. CM
-      // TYPES instead of snapping the block in.
-      const hunk = 'def hi():\n    return 42\n';
-      let prevLen = txt().length;
-      let grew = true;
-      for (const ch of hunk) {
-        const end = view.state.doc.length;
-        view.dispatch({ changes: { from: end, insert: ch } });
-        const now = txt().length;
-        if (now < prevLen) grew = false;       // never shrinks
-        prevLen = now;
+      // REVEAL via the REAL pure plan (web/cmreveal.js) applied through CM
+      // transactions EXACTLY as ide.js does: setState(initialDoc), then replace the
+      // growing region [from, from+prev] per step. Asserts CM TYPES (doc grows
+      // monotonically over >1 step, never snaps) and lands on fullDoc EXACTLY. This
+      // DOM-gates increment 3's actual plan code through real CodeMirror.
+      const cmr = await import('/static/cmreveal.js');
+      out.planImported = true;
+      const fullDoc = 'alpha\nbeta\ngamma\ndelta\nepsilon';
+      const plan = cmr.cmRevealPlan(fullDoc, 2, 4);   // reveal lines 2..4 (beta..delta)
+      view.setState(m.EditorState.create({
+        doc: plan.initialDoc,
+        extensions: [m.EditorView.editable.of(false), m.EditorState.readOnly.of(true)],
+      }));
+      let prev = 0, lastDocLen = view.state.doc.length, monotonic = true;
+      for (const step of plan.steps) {
+        view.dispatch({ changes: { from: plan.from, to: plan.from + prev, insert: step } });
+        prev = step.length;
+        const dl = view.state.doc.length;
+        if (dl < lastDocLen) monotonic = false;       // never shrinks (no snap-then-trim)
+        lastDocLen = dl;
       }
-      out.revealGrew = grew && prevLen > out.mountedText.length;
-      out.revealFinalOk = txt().includes('def hi():') && txt().includes('return 42');
+      const finalDoc = view.state.doc.toString();
+      const domText = (view.contentDOM && view.contentDOM.textContent) || '';
+      out.revealGrew = monotonic && plan.steps.length > 1;          // typed, didn't snap
+      out.revealFinalOk = finalDoc === fullDoc && domText.includes('beta') && domText.includes('delta');
       view.destroy();
       host.remove();
     } catch (e) {
