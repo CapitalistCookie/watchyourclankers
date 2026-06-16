@@ -365,6 +365,14 @@ if command -v node >/dev/null 2>&1 && curl -s -o /dev/null --max-time 2 "http://
   note "  running DOM-interaction probe vs live :8900"
   node ci/interaction.mjs 8900 || fail "DOM-interaction probe FAILED — a gutter drag is broken (real pointer events)"
   note "  DOM-interaction probe passed"
+  # no-cache guard: a served frontend asset MUST carry Cache-Control: no-cache, or
+  # an edited mosaic.js/ide.css goes stale in the browser again (the "deployed but
+  # not fixed" class). server.py nocache_middleware sets it; assert it didn't regress.
+  WYC_TOK=$(cat /data/clanker/watchyourclankers/.wyc_token 2>/dev/null || true)
+  curl -s -D - -o /dev/null --max-time 3 "http://127.0.0.1:8900/static/mosaic.js?token=${WYC_TOK}" \
+    | grep -qi "cache-control: no-cache" \
+    || fail "served static assets lost 'Cache-Control: no-cache' (stale-UI regression — server.py nocache_middleware)"
+  note "  static assets carry no-cache (no stale-UI regression)"
 else
   note "  (no live daemon on :8900 — DOM probe deferred to ci/full.sh)"
 fi
