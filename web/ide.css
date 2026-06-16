@@ -9,19 +9,23 @@
  * file tree) runs full page height. Reuses the clanker palette tokens from
  * styles.css. Flat: depth via layered browns + 1px borders. */
 
-/* ============================================================ layout shell */
+/* ============================================================ layout shell
+ * RESIZABLE grid (#2). ide.js owns the live track sizes — on mount it restores
+ * {treeW, termH} and rebuilds `grid-template-columns/rows` from them on every
+ * drag. So placement here is LINE-BASED (grid-column/grid-row numbers), NOT
+ * named areas: a stale grid-template-areas would silently mismatch the JS's
+ * explicit 3-col × 4-row track template and drop every pane to auto-placement.
+ * Track map (set by JS, defaults below as a no-JS fallback):
+ *   columns:  1 tree | 2 gutter(gCol) | 3 editor
+ *   rows:     1 editor | 2 gutter(gRow) | 3 terminal | 4 status   */
 .ide {
   flex: 1 1 auto;
   min-height: 0; min-width: 0;
   width: 100%; height: 100%;
   display: grid;
-  /* tree | (editor over terminal); status line spans the bottom */
-  grid-template-columns: minmax(180px, 220px) 1fr;
-  grid-template-rows: 1fr minmax(120px, 30%) auto;
-  grid-template-areas:
-    "tree   editor"
-    "tree   terminal"
-    "status status";
+  /* no-JS fallback tracks (JS overrides inline; keep in sync with #3 defaults) */
+  grid-template-columns: 150px 6px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) 6px 200px auto;
   gap: 1px;
   background: var(--border-c);
   position: relative;
@@ -36,10 +40,26 @@
   flex-direction: column;
   overflow: hidden;
 }
-.ide-tree     { grid-area: tree; background: var(--bg-void); }
-.ide-editor   { grid-area: editor; background: var(--bg-deep); }
-.ide-terminal { grid-area: terminal; background: var(--bg-void); }
-.ide-status   { grid-area: status; }
+/* line-based placement — agrees with JS's track template (gutters take cols/rows
+ * 2). The status row spans all three columns along the bottom. */
+.ide-tree     { grid-column: 1; grid-row: 1 / 4; background: var(--bg-void); }
+.ide-editor   { grid-column: 3; grid-row: 1; background: var(--bg-deep); }
+.ide-terminal { grid-column: 3; grid-row: 3; background: var(--bg-void); }
+.ide-status   { grid-column: 1 / 4; grid-row: 4; }
+
+/* ============================================================ resize gutters (#2)
+ * Real grid children occupying the gutter tracks. resize.js injects the base
+ * .wyc-gutter visuals + cursors; here we just place them on the grid lines and
+ * give the hairline a clanker tint. gCol = tree↔editor (col 2, spans rows 1-3);
+ * gRow = editor↔terminal (col 3, row 2). */
+.ide-gutter { z-index: 6; }
+.ide-gutter-col { grid-column: 2; grid-row: 1 / 4; }
+.ide-gutter-row { grid-column: 3; grid-row: 2; }
+/* scoped under .ide so this clanker tint beats resize.js's generic .wyc-gutter
+ * hairline regardless of stylesheet load order (equal-specificity tie otherwise) */
+.ide .ide-gutter::after { background: var(--border-c); opacity: .55; }
+.ide .ide-gutter:hover::after,
+.ide .ide-gutter.dragging::after { background: var(--accent); opacity: 1; }
 
 /* shared little section header */
 .ide-hdr {
@@ -62,20 +82,23 @@
   overflow: auto;
 }
 
-/* ============================================================ file tree
- * BOUNDED: the .ide-tree pane is a grid cell with min-height:0, and .ide-body
- * scrolls — so the tree never runs full height. Nodes are compact + mono. */
-.tree-list { padding: 4px 0 10px; }
+/* ============================================================ file tree (#3)
+ * BOUNDED + COMPACT: the .ide-tree pane is a grid cell with min-height:0, and
+ * .ide-body scrolls — so the tree never runs full height. Default width is now
+ * ~150px (resizable per #2); rows are tighter (mono 11.5px, line-height 1.25,
+ * smaller indent step + icons) so more of the touched-file set fits at a glance.
+ * Still independently scrollable; long names ellipsize. */
+.tree-list { padding: 3px 0 8px; }
 
 .tree-node {
-  display: flex; align-items: center; gap: 6px;
-  padding: 2px 8px 2px 0;
-  font-family: var(--mono); font-size: 12px;
+  display: flex; align-items: center; gap: 4px;
+  padding: 1px 6px 1px 0;
+  font-family: var(--mono); font-size: 11.5px;
   color: var(--text-secondary);
   white-space: nowrap;
   cursor: default;
   border-left: 2px solid transparent;
-  line-height: 1.4;
+  line-height: 1.25;
 }
 .tree-node.file { cursor: pointer; }
 .tree-node.file:hover { background: var(--bg-panel); color: var(--text-primary); }
@@ -90,20 +113,20 @@
 }
 .tree-node.current .tw-name { color: var(--cream); }
 
-/* subtle indent guide via the twist column */
+/* subtle indent guide via the twist column (compact #3) */
 .tw-twist {
-  flex: 0 0 auto; width: 12px; text-align: center;
-  color: var(--text-muted); font-size: 9px;
+  flex: 0 0 auto; width: 10px; text-align: center;
+  color: var(--text-muted); font-size: 8px;
   transition: transform .12s ease;
 }
 .tree-node.dir.collapsed .tw-twist { transform: rotate(-90deg); }
-.tw-icon { flex: 0 0 auto; width: 13px; text-align: center; opacity: .7; }
+.tw-icon { flex: 0 0 auto; width: 11px; text-align: center; font-size: 9.5px; opacity: .7; }
 .tw-name { overflow: hidden; text-overflow: ellipsis; }
 
 /* a small dot marking a freshly-touched file */
 .tw-dot {
   flex: 0 0 auto;
-  width: 6px; height: 6px; border-radius: 50%;
+  width: 5px; height: 5px; border-radius: 50%;
   margin-left: auto;
   background: var(--accent);
   opacity: 0;
@@ -188,7 +211,35 @@
 /* a thin gutter accent on the focused edit line */
 .editor-wrap .cm-line.wyc-hunk-line { box-shadow: inset 2px 0 0 var(--accent); }
 
-/* fallback (CDN failed): a highlighted <pre> instead of CodeMirror */
+/* ---- follow-paused chip (#1): manual-override affordance. Floats bottom-center
+ * of the editor; only visible when auto-follow is paused (user scrolled away).
+ * Click resumes + jumps back to the live edit. Works over CM AND the fallback. */
+.wyc-follow-chip {
+  position: absolute; left: 50%; bottom: 12px; z-index: 8;
+  transform: translateX(-50%) translateY(6px);
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: .08em;
+  color: var(--bg-void);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  padding: 5px 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,.45);
+  opacity: 0; pointer-events: none;
+  transition: opacity .16s ease, transform .16s ease, background .12s ease;
+}
+.wyc-follow-chip::before {
+  content: "▾"; font-size: 9px; line-height: 1;
+}
+.wyc-follow-chip.on { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
+.wyc-follow-chip:hover { background: var(--accent-amber); border-color: var(--accent-amber); }
+
+/* fallback (CDN failed): a highlighted <pre> instead of CodeMirror. This path is
+ * what renders HEADLESS, so follow-lines (#1) MUST work here: each source line is
+ * its own .efline block (so offsetTop is meaningful for scroll-to + the flash is a
+ * per-line block). The <pre> itself is the scroll container ide.js scrolls. */
 .editor-fallback {
   position: absolute; inset: 0;
   margin: 0; padding: 10px 12px;
@@ -199,12 +250,16 @@
   overflow: auto;
   tab-size: 2;
 }
+.editor-fallback .efline { display: block; }
 .editor-fallback .ln {
   display: inline-block; width: 3.2em;
   color: var(--text-muted); user-select: none;
   text-align: right; padding-right: 1.1em;
 }
-.editor-fallback .wyc-hunk-flash { animation: hunkflash 1.6s ease-out; display: block; }
+/* the just-edited line: persistent gutter accent (wyc-hunk-line) + a transient
+ * background flash (wyc-hunk-flash). Both target the .efline block. */
+.editor-fallback .efline.wyc-hunk-flash { animation: hunkflash 1.6s ease-out; }
+.editor-fallback .efline.wyc-hunk-line { box-shadow: inset 2px 0 0 var(--accent); background: rgba(194,65,12,.07); }
 .editor-fallback-note {
   position: absolute; top: 8px; right: 12px; z-index: 3;
   font-family: var(--mono); font-size: 9px;
@@ -383,16 +438,13 @@
 }
 .st-raw[hidden] { display: none; }
 
-/* ============================================================ responsive */
+/* ============================================================ responsive
+ * The IDE normally mounts inside a mosaic tile (rarely full-viewport), and
+ * ide.js sets the grid track template INLINE for the resizer — which wins over a
+ * media-query template. So at very narrow widths we don't try to restack the
+ * grid (we'd lose to the inline style); we just keep the tree from dominating by
+ * tightening its column floor via the no-JS fallback and capping its rows. The
+ * resizer remains the primary width control. */
 @media (max-width: 820px) {
-  .ide {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr minmax(110px, 30%) auto;
-    grid-template-areas:
-      "tree"
-      "editor"
-      "terminal"
-      "status";
-  }
-  .ide-tree { max-height: 130px; }
+  .ide { grid-template-columns: 120px 6px minmax(0, 1fr); }
 }

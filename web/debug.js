@@ -14,6 +14,8 @@
  * NOT full re-render (Principle VII).
  */
 
+import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js';
+
 const KIND_ICON = {
   edit: '✎', write: '✚', read: '👁', bash: '$', search: '🔍',
   task: '⚇', todo: '☑', web: '🌐', other: '•',
@@ -21,6 +23,19 @@ const KIND_ICON = {
 const STATUS_LABEL = { busy: 'busy', idle: 'idle', ended: 'ended' };
 
 const MAX_TICKER_DOM = 400; // cap rendered ticker rows; trim oldest from the top
+
+// ---- resizable layout (FR-010 panes are user-draggable) --------------------
+// The base CSS lays .dbg out via named areas:
+//   columns: sessions | (ticker/terminal stack)   rows: ticker / terminal
+//     "sessions ticker" / "sessions terminal"
+// We override that with explicit line-based placement so we can splice in two
+// 6px gutter tracks: a vertical (col-resize) gutter between the sessions pane
+// and the right stack, and a horizontal (row-resize) gutter between the ticker
+// and terminal panes. Sizes are stored as fractions of the container.
+const LAYOUT_KEY = 'wyc.debug.layout.v1';
+const GUTTER_PX = 6;
+const MIN_FRAC = 0.12;            // no track may collapse below ~12%
+const DEFAULTS = { col: 0.44, row: 0.5 }; // col = sessions share of width; row = ticker share of right-stack height
 
 // ---- helpers ---------------------------------------------------------------
 function el(tag, cls, text) {
@@ -84,8 +99,67 @@ export function mount(el_, store) {
   const xBody = el('div', 'pane-body term-pane-body');
   xPane.append(xHdr, xBody);
 
-  root.append(sPane, tPane, xPane);
+  // ----- resizable gutters -----
+  // colGutter sits between sessions (left) and the ticker/terminal stack (right).
+  // rowGutter sits between ticker (top-right) and terminal (bottom-right).
+  const colGutter = makeGutter('x');
+  const rowGutter = makeGutter('y');
+
+  // Explicit line-based placement overrides the named grid-areas so the gutter
+  // tracks have somewhere to live. Grid becomes 3 cols × 3 rows:
+  //   col 1 = sessions width, col 2 = colGutter, col 3 = right stack
+  //   row 1 = ticker height,  row 2 = rowGutter, row 3 = terminal
+  sPane.style.gridArea = '1 / 1 / 4 / 2';     // left column, all rows
+  colGutter.style.gridArea = '1 / 2 / 4 / 3'; // gutter column, all rows (grab anywhere)
+  tPane.style.gridArea = '1 / 3 / 2 / 4';     // right column, top row
+  rowGutter.style.gridArea = '2 / 3 / 3 / 4'; // right column, gutter row
+  xPane.style.gridArea = '3 / 3 / 4 / 4';     // right column, bottom row
+
+  root.append(sPane, colGutter, tPane, rowGutter, xPane);
   el_.append(root);
+
+  // current fractions (restored from storage, else defaults)
+  const stored = loadSizes(LAYOUT_KEY);
+  const layout = {
+    col: clampFrac(stored && typeof stored.col === 'number' ? stored.col : DEFAULTS.col),
+    row: clampFrac(stored && typeof stored.row === 'number' ? stored.row : DEFAULTS.row),
+  };
+
+  function clampFrac(f) { return clamp(f, MIN_FRAC, 1 - MIN_FRAC); }
+
+  // Write the grid templates from the current fractions. The gutter tracks are a
+  // fixed 6px; the two content tracks split the remaining space by fraction.
+  function applyLayout() {
+    root.style.gridTemplateColumns =
+      `minmax(0, ${layout.col}fr) ${GUTTER_PX}px minmax(0, ${1 - layout.col}fr)`;
+    root.style.gridTemplateRows =
+      `minmax(0, ${layout.row}fr) ${GUTTER_PX}px minmax(0, ${1 - layout.row}fr)`;
+  }
+  applyLayout();
+
+  // Drag math: convert the pixel delta into a fraction of the relevant container
+  // dimension (minus the gutter) so dragging tracks the cursor 1:1.
+  let startCol = 0, startRow = 0, colSpan = 1, rowSpan = 1;
+  attachDrag(colGutter, {
+    axis: 'x',
+    onStart: () => { startCol = layout.col; colSpan = Math.max(1, root.clientWidth - GUTTER_PX); },
+    onDelta: (dx) => { layout.col = clampFrac(startCol + dx / colSpan); applyLayout(); },
+    onEnd: () => saveSizes(LAYOUT_KEY, { col: layout.col, row: layout.row }),
+  });
+  attachDrag(rowGutter, {
+    axis: 'y',
+    onStart: () => { startRow = layout.row; rowSpan = Math.max(1, root.clientHeight - GUTTER_PX); },
+    onDelta: (dy) => { layout.row = clampFrac(startRow + dy / rowSpan); applyLayout(); },
+    onEnd: () => saveSizes(LAYOUT_KEY, { col: layout.col, row: layout.row }),
+  });
+
+  // Double-click a gutter resets that axis to its default.
+  colGutter.addEventListener('dblclick', () => {
+    layout.col = DEFAULTS.col; applyLayout(); saveSizes(LAYOUT_KEY, { col: layout.col, row: layout.row });
+  });
+  rowGutter.addEventListener('dblclick', () => {
+    layout.row = DEFAULTS.row; applyLayout(); saveSizes(LAYOUT_KEY, { col: layout.col, row: layout.row });
+  });
 
   // ----- ticker state: append-only -----
   let tickerMaxSeq = 0;

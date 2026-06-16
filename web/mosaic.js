@@ -34,6 +34,32 @@
  */
 
 import mountMenu from './menu.js';
+import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js';
+
+// persisted pane-size store key (separate from menu.js's settings blob). Holds
+// per-layout grid track sizes + the rail width + the chosen "vert" layout.
+const LAYOUT_KEY = 'wyc.mosaic.layout.v1';
+// every track clamps to this fraction of the grid so none can collapse to 0.
+const TRACK_MIN_FRAC = 0.12;
+const RAIL_MIN = 140, RAIL_MAX = 420;
+// columns × rows per layout id (drives gutter placement + portrait swap).
+// 'vert' is the portrait stack (1 column, N rows that fill the height).
+const GRID_DIMS = {
+  1: { cols: 1, rows: 1 },
+  2: { cols: 2, rows: 1 },
+  4: { cols: 2, rows: 2 },
+  6: { cols: 3, rows: 2 },
+  vert: { cols: 1, rows: 4 },
+};
+// portrait remap: when the viewport is taller than wide, a landscape layout
+// re-orients so tiles stack into more rows than columns.
+const PORTRAIT_DIMS = {
+  1: { cols: 1, rows: 1 },
+  2: { cols: 1, rows: 2 },
+  4: { cols: 2, rows: 2 },
+  6: { cols: 2, rows: 3 },
+  vert: { cols: 1, rows: 4 },
+};
 
 // lazily-loaded ide.js mount fn (or null if unavailable)
 let _ideMod = undefined; // undefined = not tried, null = unavailable, fn = loaded
@@ -78,6 +104,12 @@ function stripAnsi(s) { return s ? String(s).replace(ANSI_RE, '') : ''; }
 
 // busy-first thread ranking by lead session status, then recency.
 const STATUS_RANK = { busy: 0, idle: 1, ended: 2 };
+// activity kinds that mean "code is being generated" (drive the editing signal).
+const EDIT_KINDS = { edit: 1, write: 1 };
+// a thread counts as "actively editing" only if its newest edit/write is this
+// fresh (seconds). Older edits still rank above plain-busy via recency, but the
+// fewer-but-larger / ✎-emphasis only fires while an edit is genuinely recent.
+const EDIT_ACTIVE_WINDOW_S = 45;
 
 // ================================================================ main
 /**
@@ -107,8 +139,15 @@ export function mountMosaic(rootEl, store) {
   for (const ly of [1, 2, 4, 6]) {
     const b = el('button', null, ly + '-up');
     b.title = `layout: ${ly} tiles`;
-    b.addEventListener('click', () => { menu.setView({ layout: ly }); menu.setSetting('layout', ly); });
+    b.addEventListener('click', () => setLayout(ly));
     layoutSeg.append(b); layoutBtns[ly] = b;
+  }
+  // vertical-monitor layout: a single column of stacked rows for a portrait screen.
+  {
+    const b = el('button', 'mos-vert-btn', '▯ vert');
+    b.title = 'layout: vertical (portrait monitor) — stacked column';
+    b.addEventListener('click', () => setLayout('vert'));
+    layoutSeg.append(b); layoutBtns.vert = b;
   }
   const modeChip = el('div', 'mos-mode');
   modeChip.append(document.createTextNode('auto-switch '), el('b', null, ''));
@@ -129,7 +168,7 @@ export function mountMosaic(rootEl, store) {
   paletteBtn.addEventListener('click', () => menu.open());
   bar.append(layoutSeg, modeChip, barSpacer, redactionChip, railToggle, settingsBtn, paletteBtn);
 
-  // --- stage: grid + rail ---
+  // --- stage: grid + (rail gutter) + rail ---
   const stage = el('div', 'mos-stage');
   const grid = el('div', 'mos-grid');
   const rail = el('div', 'mos-rail');
@@ -137,7 +176,11 @@ export function mountMosaic(rootEl, store) {
   railHdr.append(el('span', 'accent', 'more'), el('span', 'r-count', ''));
   const railBody = el('div', 'mos-rail-body');
   rail.append(railHdr, railBody);
-  stage.append(grid, rail);
+  // vertical gutter between the tile grid and the overflow rail (resizes rail width)
+  const railGutter = makeGutter('x');
+  railGutter.classList.add('mos-rail-gutter');
+  railGutter.title = 'drag to resize rail · double-click to reset';
+  stage.append(grid, railGutter, rail);
 
   // --- mobile FAB ---
   const fab = el('div', 'mos-fab');
@@ -186,6 +229,300 @@ export function mountMosaic(rootEl, store) {
   let maximizedTileIdx = -1;     // -1 = none
   let focusedTileIdx = 0;        // which tile has keyboard/command focus
   let mobileIdx = 0;            // which active-thread index is shown on mobile
+
+  // ================================================================ pane sizing
+  // Persisted layout sizes (separate localStorage blob, NOT menu.js settings):
+  //   { vertLayout?: true, railW?: number, layout1:{cols,rows}, layout2:{...}, ... }
+  // cols/rows are arrays of fr weights (one per track) for that layout's CURRENT
+  // orientation key. Restored on mount, re-applied whenever the grid re-gutters.
+  /** @type {{vertLayout?:boolean, railW?:number, [k:string]:any}} */
+  let sizes = loadSizes(LAYOUT_KEY) || {};
+  let railCollapsed = false;     // rail explicitly dragged shut
+  /** @type {HTMLElement[]} */
+  let trackGutters = [];         // gutters currently overlaid on the grid
+  let lastGutterKey = '';        // dims+orientation signature the gutters were built for
+
+  // The mosaic's own "vertical layout" choice lives here (menu.js can't store a
+  // non-numeric layout). When set, it overrides menu.effLayout().
+  function vertChosen() { return !!sizes.vertLayout; }
+  function setVertChosen(on) {
+    if (!!sizes.vertLayout === !!on) return;
+    if (on) sizes.vertLayout = true; else delete sizes.vertLayout;
+    saveSizes(LAYOUT_KEY, sizes);
+  }
+
+  // is the viewport portrait (taller than wide)? drives the landscape→stacked remap.
+  function isPortrait() {
+    try {
+      if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+        return window.matchMedia('(orientation: portrait)').matches;
+      }
+      return window.innerHeight > window.innerWidth;
+    } catch (_) { return false; }
+  }
+
+  // The layout the mosaic should render: 'vert' if chosen, else the menu's numeric
+  // layout. (auto-pick: if the operator never chose and the screen is portrait, we
+  // bias the *orientation* of numeric layouts via effDims rather than force 'vert'.)
+  function activeLayoutId() { return vertChosen() ? 'vert' : menu.effLayout(); }
+
+  // effective cols×rows for the active layout, portrait-remapped when applicable.
+  // For 'vert' the row count is dynamic (fills the height) → 1 col × vertRowCount.
+  function effDims() {
+    const id = activeLayoutId();
+    if (id === 'vert') return { cols: 1, rows: vertRowCount() };
+    const base = GRID_DIMS[id] || GRID_DIMS[2];
+    return isPortrait() ? (PORTRAIT_DIMS[id] || base) : base;
+  }
+
+  // number of tiles the active layout shows (cols*rows).
+  function effSlots() {
+    const d = effDims();
+    return d.cols * d.rows;
+  }
+
+  // vertical layout row count: enough rows to fill the grid height (min 2, max 8).
+  function vertRowCount() {
+    let h = 0;
+    try { h = grid.getBoundingClientRect().height || 0; } catch (_) {}
+    if (!h) { try { h = stage.getBoundingClientRect().height || 0; } catch (_) {} }
+    const per = 220; // target tile height in the stack
+    return clamp(Math.round(h / per) || 3, 2, 8);
+  }
+
+  // storage key for a layout's track sizes (orientation-aware so portrait/landscape
+  // keep independent splits).
+  function trackKey() {
+    const id = activeLayoutId();
+    return 'layout' + id + (isPortrait() && id !== 'vert' ? 'P' : '');
+  }
+
+  // normalize a weight array to N tracks (default = equal fr), clamped each ≥ min.
+  function normTracks(arr, n) {
+    let a = Array.isArray(arr) && arr.length === n ? arr.slice() : null;
+    if (!a) a = new Array(n).fill(1);
+    const min = TRACK_MIN_FRAC * a.reduce((s, x) => s + (x > 0 ? x : 0), 0) / n;
+    return a.map((x) => (x > min ? x : (min || 1)));
+  }
+
+  // build the grid-template-{columns,rows} strings from persisted (or default) fr
+  // weights and apply them inline (overriding the data-layout CSS defaults).
+  function applyGridTemplate() {
+    const d = effDims();
+    const k = trackKey();
+    const store_ = sizes[k] || {};
+    const colW = normTracks(store_.cols, d.cols);
+    const rowW = normTracks(store_.rows, d.rows);
+    grid.style.gridTemplateColumns = colW.map((w) => w + 'fr').join(' ');
+    grid.style.gridTemplateRows = rowW.map((w) => w + 'fr').join(' ');
+  }
+
+  // read the live pixel sizes of the grid's tracks (used as drag baselines).
+  function trackPx(which) {
+    try {
+      const cs = getComputedStyle(grid);
+      return (which === 'cols' ? cs.gridTemplateColumns : cs.gridTemplateRows)
+        .split(' ').map(parseFloat).filter((x) => !isNaN(x));
+    } catch (_) { return []; }
+  }
+
+  // remove any existing track gutters from the grid.
+  function clearTrackGutters() {
+    for (const g of trackGutters) { try { g.remove(); } catch (_) {} }
+    trackGutters = [];
+  }
+
+  // (re)create the internal track gutters for the current dims. Vertical gutters
+  // sit on each column boundary, horizontal gutters on each row boundary. They are
+  // absolutely-positioned overlays (so they don't perturb the tile grid items or
+  // the .mos-tile counting / :not(.is-max) selectors).
+  function buildTrackGutters() {
+    clearTrackGutters();
+    const d = effDims();
+    // no internal boundaries to drag when maximized or single-track each way.
+    if (maximizedTileIdx >= 0) { lastGutterKey = ''; return; }
+    // column boundaries: between track i and i+1 (i = 0..cols-2)
+    for (let i = 0; i < d.cols - 1; i++) {
+      const g = makeGutter('x');
+      g.classList.add('mos-track-gutter', 'mos-track-col');
+      g.dataset.boundary = String(i);
+      grid.appendChild(g);
+      wireColGutter(g, i);
+      trackGutters.push(g);
+    }
+    // row boundaries
+    for (let j = 0; j < d.rows - 1; j++) {
+      const g = makeGutter('y');
+      g.classList.add('mos-track-gutter', 'mos-track-row');
+      g.dataset.boundary = String(j);
+      grid.appendChild(g);
+      wireRowGutter(g, j);
+      trackGutters.push(g);
+    }
+    positionTrackGutters();
+    lastGutterKey = gutterKey();
+  }
+
+  // signature that determines when gutters must be rebuilt (dims + orientation + max)
+  function gutterKey() {
+    const d = effDims();
+    return activeLayoutId() + ':' + d.cols + 'x' + d.rows + ':' + (maximizedTileIdx >= 0 ? 'max' : '-');
+  }
+
+  // place each overlay gutter at its track boundary using live track pixel sizes.
+  function positionTrackGutters() {
+    if (!trackGutters.length) return;
+    const cols = trackPx('cols');
+    const rows = trackPx('rows');
+    let gap = 0;
+    try { gap = parseFloat(getComputedStyle(grid).gap) || 0; } catch (_) {}
+    for (const g of trackGutters) {
+      const i = Number(g.dataset.boundary);
+      if (g.classList.contains('mos-track-col')) {
+        // x position = sum of col widths 0..i + gaps + half the gap gutter sits in
+        let x = 0;
+        for (let k = 0; k <= i; k++) x += (cols[k] || 0) + (k < i ? gap : 0);
+        g.style.left = (x + gap / 2) + 'px';
+        g.style.top = '0';
+      } else {
+        let y = 0;
+        for (let k = 0; k <= i; k++) y += (rows[k] || 0) + (k < i ? gap : 0);
+        g.style.top = (y + gap / 2) + 'px';
+        g.style.left = '0';
+      }
+    }
+  }
+
+  // wire a column-boundary gutter: shift fr weight between track i and i+1.
+  function wireColGutter(g, i) {
+    let baseW = [], totalPx = 0, totalFr = 0;
+    attachDrag(g, {
+      axis: 'x',
+      onStart: () => {
+        baseW = trackPx('cols');
+        totalPx = baseW.reduce((s, x) => s + x, 0) || 1;
+        const k = trackKey();
+        totalFr = normTracks((sizes[k] || {}).cols, baseW.length).reduce((s, x) => s + x, 0) || baseW.length;
+      },
+      onDelta: (dx) => {
+        const a = baseW[i], b = baseW[i + 1];
+        if (a == null || b == null) return;
+        const minPx = TRACK_MIN_FRAC * totalPx;
+        const na = clamp(a + dx, minPx, a + b - minPx);
+        const nb = a + b - na;
+        // convert the two adjusted px widths back to fr (px→fr via totalFr/totalPx)
+        const k2px2fr = totalFr / totalPx;
+        const next = baseW.map((w, idx) => (idx === i ? na : idx === i + 1 ? nb : w) * k2px2fr);
+        grid.style.gridTemplateColumns = next.map((w) => w + 'fr').join(' ');
+        positionTrackGutters();
+      },
+      onEnd: () => persistTracks('cols'),
+    });
+    g.addEventListener('dblclick', () => resetTracks());
+  }
+
+  // wire a row-boundary gutter: shift fr weight between row j and j+1.
+  function wireRowGutter(g, j) {
+    let baseH = [], totalPx = 0, totalFr = 0;
+    attachDrag(g, {
+      axis: 'y',
+      onStart: () => {
+        baseH = trackPx('rows');
+        totalPx = baseH.reduce((s, x) => s + x, 0) || 1;
+        const k = trackKey();
+        totalFr = normTracks((sizes[k] || {}).rows, baseH.length).reduce((s, x) => s + x, 0) || baseH.length;
+      },
+      onDelta: (dy) => {
+        const a = baseH[j], b = baseH[j + 1];
+        if (a == null || b == null) return;
+        const minPx = TRACK_MIN_FRAC * totalPx;
+        const na = clamp(a + dy, minPx, a + b - minPx);
+        const nb = a + b - na;
+        const px2fr = totalFr / totalPx;
+        const next = baseH.map((w, idx) => (idx === j ? na : idx === j + 1 ? nb : w) * px2fr);
+        grid.style.gridTemplateRows = next.map((w) => w + 'fr').join(' ');
+        positionTrackGutters();
+      },
+      onEnd: () => persistTracks('rows'),
+    });
+    g.addEventListener('dblclick', () => resetTracks());
+  }
+
+  // persist current live track fr weights for the active layout's track key.
+  function persistTracks(which) {
+    const k = trackKey();
+    const cur = sizes[k] || {};
+    if (which === 'cols' || which == null) {
+      const px = trackPx('cols'); const tot = px.reduce((s, x) => s + x, 0) || 1;
+      cur.cols = px.map((w) => (w / tot) * px.length);
+    }
+    if (which === 'rows' || which == null) {
+      const px = trackPx('rows'); const tot = px.reduce((s, x) => s + x, 0) || 1;
+      cur.rows = px.map((w) => (w / tot) * px.length);
+    }
+    sizes[k] = cur;
+    saveSizes(LAYOUT_KEY, sizes);
+  }
+
+  // double-click reset: drop this layout's persisted tracks back to equal fr.
+  function resetTracks() {
+    const k = trackKey();
+    delete sizes[k];
+    saveSizes(LAYOUT_KEY, sizes);
+    applyGridTemplate();
+    positionTrackGutters();
+  }
+
+  // ---- rail width gutter ----
+  function applyRailWidth() {
+    if (railCollapsed) { rail.style.width = '0px'; rail.classList.add('mos-rail-collapsed'); return; }
+    rail.classList.remove('mos-rail-collapsed');
+    const w = sizes.railW;
+    if (typeof w === 'number') rail.style.width = clamp(w, RAIL_MIN, RAIL_MAX) + 'px';
+    else rail.style.width = '';
+  }
+  (function wireRailGutter() {
+    let startW = 0;
+    attachDrag(railGutter, {
+      axis: 'x',
+      onStart: () => { startW = rail.getBoundingClientRect().width || RAIL_MIN; railCollapsed = false; },
+      onDelta: (dx) => {
+        // rail is to the RIGHT of the gutter: dragging left (dx<0) widens it.
+        const raw = startW - dx;
+        if (raw < RAIL_MIN * 0.6) { rail.style.width = '0px'; rail.classList.add('mos-rail-collapsing'); return; }
+        rail.classList.remove('mos-rail-collapsing');
+        rail.style.width = clamp(raw, RAIL_MIN, RAIL_MAX) + 'px';
+      },
+      onEnd: () => {
+        const w = rail.getBoundingClientRect().width;
+        if (w < RAIL_MIN * 0.6) { railCollapsed = true; sizes.railW = RAIL_MIN; rail.classList.add('mos-rail-collapsed'); }
+        else { railCollapsed = false; sizes.railW = clamp(w, RAIL_MIN, RAIL_MAX); }
+        rail.classList.remove('mos-rail-collapsing');
+        saveSizes(LAYOUT_KEY, sizes);
+        applyRailWidth();
+      },
+    });
+    railGutter.addEventListener('dblclick', () => {
+      railCollapsed = false; delete sizes.railW; saveSizes(LAYOUT_KEY, sizes); applyRailWidth();
+    });
+  })();
+
+  // rebuild gutters + re-apply templates when the layout/orientation changes.
+  function syncGutters() {
+    applyGridTemplate();
+    if (gutterKey() !== lastGutterKey) buildTrackGutters();
+    else positionTrackGutters();
+    // the rail gutter only matters when the rail is visible.
+    railGutter.style.display = rail.classList.contains('hidden') ? 'none' : '';
+    applyRailWidth();
+  }
+
+  // viewport resize: re-evaluate portrait remap + vert row count, then re-gutter.
+  let _roTimer = null;
+  function onViewportResize() {
+    if (_roTimer) clearTimeout(_roTimer);
+    _roTimer = setTimeout(() => { _roTimer = null; reflow(true); }, 120);
+  }
 
   // ---------------------------------------------------------------- create a tile
   function createTile() {
@@ -637,7 +974,49 @@ export function mountMosaic(rootEl, store) {
     return STATUS_RANK[lead && lead.status] ?? 3;
   }
 
-  // ACTIVE threads = have at least one non-ended session; busy-first then recency.
+  // ---- actively-editing signal ----------------------------------------------
+  // The recency (ts, seconds) of a thread's lead session's NEWEST edit/write
+  // activity — i.e. when it last GENERATED CODE. 0 = never. We scan the lead
+  // session's bounded activity ring from the tail (newest first). Memoized per
+  // reflow generation so the several activeThreads()/ranking calls per change
+  // don't re-walk rings (Principle VII).
+  let _editGen = 0;                 // bumped each onChange/reflow pass
+  const _editMemo = new Map();      // threadId -> { gen, ts }
+  function bumpEditGen() { _editGen++; }
+  function threadEditRecency(th) {
+    if (!th) return 0;
+    const memo = _editMemo.get(th.id);
+    if (memo && memo.gen === _editGen) return memo.ts;
+    const lead = leadSession(th.id);
+    let ts = 0;
+    if (lead) {
+      let ring = [];
+      try { ring = store.activitiesForSession(lead.id) || []; } catch (_) { ring = []; }
+      for (let i = ring.length - 1; i >= 0; i--) {
+        const a = ring[i];
+        if (a && EDIT_KINDS[a.kind]) { ts = a.ts || 0; break; }
+      }
+    }
+    _editMemo.set(th.id, { gen: _editGen, ts });
+    return ts;
+  }
+  // is this thread editing code RIGHT NOW (newest edit/write within the window)?
+  function isActivelyEditing(th) {
+    const ts = threadEditRecency(th);
+    if (!ts) return false;
+    return (nowS() - ts) <= EDIT_ACTIVE_WINDOW_S;
+  }
+  function nowS() { return Date.now() / 1000; }
+  // 3-tier activity rank: actively-editing (0) > busy (1) > idle/ended (2).
+  function threadActivityRank(th) {
+    if (isActivelyEditing(th)) return 0;
+    return threadStatusRank(th) === 0 ? 1 : 2; // busy=1, idle/ended=2
+  }
+
+  // ACTIVE threads = have at least one non-ended session. Ranking (requirement):
+  // actively-editing recency desc → busy>idle>ended → recency desc. So when more
+  // threads are active than the layout shows cleanly, the one(s) GENERATING CODE
+  // win the visible grid slots and the rest overflow to the rail.
   function activeThreads() {
     let list = [];
     try { list = store.threadsList() || []; } catch (_) { return []; }
@@ -646,8 +1025,16 @@ export function mountMosaic(rootEl, store) {
       return ss.some((s) => s && (s.status === 'busy' || s.status === 'idle'));
     });
     act.sort((a, b) => {
+      // 1) actively-editing recency desc (a fresh edit/write outranks plain-busy).
+      const ea = threadEditRecency(a), eb = threadEditRecency(b);
+      const aAct = (nowS() - ea) <= EDIT_ACTIVE_WINDOW_S && ea > 0;
+      const bAct = (nowS() - eb) <= EDIT_ACTIVE_WINDOW_S && eb > 0;
+      if (aAct !== bAct) return aAct ? -1 : 1;        // any active-editor first
+      if (aAct && bAct && eb !== ea) return eb - ea;  // freshest edit first
+      // 2) busy > idle > ended
       const r = threadStatusRank(a) - threadStatusRank(b);
       if (r) return r;
+      // 3) recency
       return threadRecency(b) - threadRecency(a);
     });
     // if nothing is active (all ended / empty), fall back to most-recent threads
@@ -657,15 +1044,27 @@ export function mountMosaic(rootEl, store) {
     return act;
   }
 
+  // The single thread that should hold the primary/largest slot in follow-latest:
+  // the actively-editing thread with the freshest edit. null if none is editing.
+  function primaryEditingThread(ranked) {
+    let best = null, bestTs = 0;
+    for (const th of ranked) {
+      const ts = threadEditRecency(th);
+      if (ts && (nowS() - ts) <= EDIT_ACTIVE_WINDOW_S && ts > bestTs) { best = th; bestTs = ts; }
+    }
+    return best;
+  }
+
   // ================================================================ reflow
   let lastReflowSig = '';
   function reflow(force) {
-    const layout = menu.effLayout();
+    bumpEditGen();                 // invalidate the per-pass edit-recency memo
+    const layout = activeLayoutId();
     const mode = menu.effMode();
     const ranked = activeThreads();
 
     // ---- decide which threads occupy the visible tiles ----
-    const slots = layout;
+    const slots = effSlots();
     // pinned tiles keep their thread (if it still exists at all)
     const visible = [];          // thread ids for tiles 0..slots-1
     const usedThreadIds = new Set();
@@ -712,13 +1111,18 @@ export function mountMosaic(rootEl, store) {
         if (visible[i]) { usedThreadIds.add(visible[i]); ri++; }
       }
     } else {
-      // focus-follows-latest (default): tile 0 = most-recent active (unless pinned),
+      // focus-follows-latest (default): tile 0 = the thread to WATCH (unless pinned),
       // remaining tiles fill by ranked order, skipping pinned threads.
-      // If the menu has a focused thread (URL/command), pin it to tile 0 slot.
+      // tile-0 priority: an explicit URL/command thread wins; else the thread most
+      // recently GENERATING CODE (freshest edit/write) so the eye lands on code
+      // being written; else fall through to the ranked head (busy-then-recency).
       const wanted = [];
       const forcedThread = menu.view && menu.view.thread;
+      const editLead = primaryEditingThread(ranked);
       if (forcedThread && ranked.some((t) => t.id === forcedThread)) {
         wanted.push(forcedThread);
+      } else if (editLead) {
+        wanted.push(editLead.id);
       }
       for (const th of ranked) {
         if (wanted.includes(th.id)) continue;
@@ -740,7 +1144,14 @@ export function mountMosaic(rootEl, store) {
       const t = tiles.pop();
       if (t) { stopWatch(t); teardownPane(t); t.elTile.remove(); }
     }
-    grid.setAttribute('data-layout', String(slots));
+    // data-layout reflects the CHOICE ('1'|'2'|'4'|'6'|'vert'); data-cols/-rows give
+    // the effective (portrait-remapped / vert-scaled) track counts the CSS uses.
+    const dims = effDims();
+    const colsN = layout === 'vert' ? 1 : dims.cols;
+    const rowsN = layout === 'vert' ? slots : dims.rows;
+    grid.setAttribute('data-layout', String(layout));
+    grid.setAttribute('data-cols', String(colsN));
+    grid.setAttribute('data-rows', String(rowsN));
 
     // ---- bind tiles to chosen threads (reconcile, minimal churn) ----
     for (let i = 0; i < slots; i++) {
@@ -757,11 +1168,23 @@ export function mountMosaic(rootEl, store) {
     if (focusedTileIdx >= slots) focusedTileIdx = 0;
     if (maximizedTileIdx >= slots) maximizedTileIdx = -1;
 
+    // ---- fewer-but-larger: emphasise the actively-edited tile ----
+    // Mark which visible tiles are GENERATING CODE (drives the ✎ accent), and in
+    // follow-latest mode auto-focus the sole active editor so it gets the primary/
+    // largest treatment when we can't show every active thread cleanly. This is
+    // subordinate to an explicit maximize (we never move focus while maximized) and
+    // only runs in 'focus' mode (manual/per-tile leave operator focus alone).
+    applyEditingEmphasis(mode, ranked);
+
     // mobile: clamp index + bind the single active tile
     syncMobile(ranked);
 
     reflectFocusBorders();
     applyMaximize();
+
+    // size tracks + (re)build internal track gutters for the current dims, then the
+    // rail gutter / rail width. applyMaximize ran first so gutterKey sees max state.
+    syncGutters();
 
     lastReflowSig = sigOf(visible, layout, mode);
   }
@@ -844,6 +1267,8 @@ export function mountMosaic(rootEl, store) {
     maximizedTileIdx = (maximizedTileIdx === idx) ? -1 : idx;
     if (maximizedTileIdx >= 0) focusedTileIdx = maximizedTileIdx;
     applyMaximize();
+    // maximizing hides internal gutters; restoring re-applies the saved tracks.
+    syncGutters();
     reflectFocusBorders();
   }
   function applyMaximize() {
@@ -861,6 +1286,27 @@ export function mountMosaic(rootEl, store) {
     // mirror focused tile's thread to the URL (replace; don't spam history)
     const ft = tiles[focusedTileIdx];
     if (ft && ft.threadId) menu.setView({ thread: ft.threadId }, { replace: true, silent: true });
+  }
+
+  // Toggle the `is-editing` accent on every visible tile whose bound thread is
+  // generating code right now, and (follow-latest only, not maximized) auto-focus
+  // the sole active editor so the layout favours fewer-but-larger — the eye on the
+  // window where code is being written. Pinned/frozen tiles keep their accent state
+  // but are never auto-focused/replaced (reflow already preserves their binding).
+  function applyEditingEmphasis(mode, ranked) {
+    let editingIdx = -1, editingCount = 0;
+    tiles.forEach((t, i) => {
+      const editing = !!t.threadId && isActivelyEditing(store.thread(t.threadId));
+      t.elTile.classList.toggle('is-editing', editing);
+      if (editing) { editingCount++; if (editingIdx < 0) editingIdx = i; }
+    });
+    // fewer-but-larger auto-emphasis: exactly one visible thread is editing while
+    // the rest are merely busy/idle → put focus on it (primary/largest slot).
+    // Subordinate to an explicit maximize; only in follow-latest mode.
+    if (mode === 'focus' && maximizedTileIdx < 0 && editingCount === 1 && editingIdx >= 0) {
+      focusedTileIdx = editingIdx;
+    }
+    void ranked;
   }
 
   function focusTileN(n) {
@@ -1009,13 +1455,31 @@ export function mountMosaic(rootEl, store) {
 
   // ================================================================ bar sync
   function syncBar() {
-    const layout = menu.effLayout();
+    const layout = activeLayoutId();
     const mode = menu.effMode();
     for (const k of Object.keys(layoutBtns)) {
-      layoutBtns[k].setAttribute('aria-pressed', String(Number(k) === layout));
+      const on = (k === 'vert') ? (layout === 'vert') : (Number(k) === layout);
+      layoutBtns[k].setAttribute('aria-pressed', String(on));
     }
     const b = modeChip.querySelector('b');
     if (b) b.textContent = mode === 'focus' ? 'follow-latest' : mode;
+  }
+
+  // choose a layout from the bar/palette. 'vert' is the mosaic's own portrait stack
+  // (stored in our LAYOUT_KEY since menu.js only knows numeric layouts); numeric
+  // layouts clear the vert choice and flow through menu.js as before.
+  function setLayout(ly) {
+    sizes.userChose = true; saveSizes(LAYOUT_KEY, sizes); // remember explicit pick
+    if (ly === 'vert') {
+      setVertChosen(true);
+      reflow(true);
+      syncBar();
+    } else {
+      setVertChosen(false);
+      menu.setView({ layout: ly });
+      menu.setSetting('layout', ly); // triggers applySettings → reflow
+      syncBar();
+    }
   }
   function cycleMode() {
     const order = ['focus', 'per-tile', 'manual'];
@@ -1069,7 +1533,14 @@ export function mountMosaic(rootEl, store) {
     cycleThread,
     annotateFocused,
     popOutFocused,
-    resetLayout: () => { maximizedTileIdx = -1; tiles.forEach((t) => { t.pinned = false; t.frozen = false; t.flagged = false; }); reflow(true); },
+    resetLayout: () => {
+      maximizedTileIdx = -1;
+      tiles.forEach((t) => { t.pinned = false; t.frozen = false; t.flagged = false; });
+      // also clear persisted pane sizes (track splits + rail width + vert choice).
+      sizes = {}; railCollapsed = false; saveSizes(LAYOUT_KEY, sizes);
+      rail.style.width = ''; lastGutterKey = '';
+      reflow(true);
+    },
     focusedThreadId: () => (tiles[focusedTileIdx] && tiles[focusedTileIdx].threadId) || null,
     // menu pushes settings/view changes here (single-writer pattern)
     onSettings: applySettings,
@@ -1085,9 +1556,27 @@ export function mountMosaic(rootEl, store) {
   // set density/accent on the root before the first reflow so tiles paint right.
   root.setAttribute('data-density', menu.settings.density);
   root.setAttribute('data-accent', menu.settings.accent);
+
+  // portrait auto-pick: on a tall screen, if the operator has NEVER made an
+  // explicit layout choice, default to the vertical stack. An explicit choice
+  // (numeric OR vert) is remembered in sizes.userChose and always wins.
+  if (!sizes.userChose && !vertChosen() && isPortrait()) {
+    setVertChosen(true);
+  }
+
   // register this mosaic; setController pushes settings+view → applySettings (which
   // reflows) + applyView (focus). One initialization path, no redundant reflows.
   menu.setController(controller);
+
+  // re-evaluate portrait/orientation + vert row-count on viewport changes.
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', onViewportResize);
+    if (typeof window.matchMedia === 'function') {
+      try { window.matchMedia('(orientation: portrait)').addEventListener('change', onViewportResize); } catch (_) {}
+    }
+  }
+  // one rAF correction so vert row-count + gutter positions use real laid-out sizes.
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => reflow(true));
 
   // initial live paint + subscribe (rAF-batched inside the store)
   onChange();
@@ -1096,6 +1585,14 @@ export function mountMosaic(rootEl, store) {
   return {
     destroy() {
       try { unsub(); } catch (_) {}
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('resize', onViewportResize);
+        if (typeof window.matchMedia === 'function') {
+          try { window.matchMedia('(orientation: portrait)').removeEventListener('change', onViewportResize); } catch (_) {}
+        }
+      }
+      if (_roTimer) clearTimeout(_roTimer);
+      clearTrackGutters();
       for (const t of tiles) { stopWatch(t); teardownPane(t); }
       tiles.length = 0;
       try { menu.destroy(); } catch (_) {}

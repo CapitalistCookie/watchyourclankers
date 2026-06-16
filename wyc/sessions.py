@@ -8,12 +8,15 @@ maintains. Each file looks like::
      "startedAt": <ms>, "updatedAt": <ms>, "version": "...", "model": "...?"}
 
 We build :class:`contract.Session` objects from these, deriving a robust
-``status`` from the registry value + freshness + liveness:
+``status`` from the registry value + liveness:
 
-  * registry ``status`` if present AND fresh (``updatedAt`` within ~10s) → use it
-    verbatim (``busy``/``idle``);
-  * older-than-fresh but the process/transcript still looks alive → ``idle``;
-  * process clearly gone AND no recent transcript activity → ``ended``.
+  * process gone → ``ended`` (linger one beat as ``idle`` if it just died);
+  * alive + registry ``busy`` → ``busy`` — TRUSTED; a busy session may not touch
+    the registry/transcript for minutes, so we do NOT downgrade on staleness
+    (only a >30min frozen "busy" reads ``idle``);
+  * alive + registry ``idle`` → ``idle`` (but a transcript append in the last
+    ~15s upgrades to ``busy``);
+  * alive, no registry status → ``busy`` iff the transcript moved recently.
 
 Milliseconds are converted to epoch seconds. Project is resolved through
 :mod:`wyc.threads` (which wraps clanker's ``resolve_project``). Malformed or
@@ -32,13 +35,19 @@ from typing import Optional
 
 from . import contract
 
-# Freshness window: a registry whose updatedAt is within this many seconds is
-# treated as authoritative for busy/idle. Poll cadence is ~1.5s, so ~10s gives
-# a few missed beats of slack before we downgrade to idle.
-FRESH_SECS = 10.0
-# How long after last activity (updatedAt) with a dead process before a session
-# is considered ended (vs merely idle). Generous so history lingers a bit.
+# A recent transcript append (within this window) means the session is actively
+# working — used to UPGRADE a lagging "idle" registry to busy, and to infer busy
+# when the registry has no status at all.
+FRESH_SECS = 15.0
+# How long after last activity with a dead process before a session is considered
+# ended (vs merely idle). Generous so history lingers a bit.
 ENDED_GRACE_SECS = 60.0
+# A registry that says "busy" is trusted for an ALIVE process regardless of how
+# long ago the file was last rewritten — a genuinely-busy session may not touch
+# the registry/transcript for minutes (a long tool runs, or it's waiting on
+# input). Only past this cap do we treat a frozen "busy" as a forgotten/stuck
+# session and show it idle. (This was the bug that buried active sessions.)
+STALE_BUSY_SECS = 1800.0
 
 
 def _ms_to_epoch(v) -> Optional[float]:
@@ -158,16 +167,24 @@ class SessionPoller:
                 return "idle"  # just died; linger one beat before ended
             return "ended"
 
-        # Process alive (or unknown). Fresh registry status wins verbatim.
-        if reg_status in ("busy", "idle") and updated_at is not None \
-                and (now - updated_at) <= FRESH_SECS:
-            return reg_status
+        # Process alive (or unknown). The registry status is Claude Code's own
+        # declaration of busy/idle — trust it, rather than guessing from how
+        # recently the registry file happened to be rewritten.
+        if reg_status == "busy":
+            # Guard only against a frozen-busy registry on a forgotten session.
+            if last_activity is None or (now - last_activity) <= STALE_BUSY_SECS:
+                return "busy"
+            return "idle"
+        if reg_status == "idle":
+            # A very recent transcript append means it's actually working again
+            # (registry "idle" can lag the first tool of a new turn).
+            if tmtime is not None and (now - tmtime) <= FRESH_SECS:
+                return "busy"
+            return "idle"
 
-        # Alive but stale registry: if transcript moved very recently, it's busy.
+        # No registry status: infer purely from transcript activity.
         if tmtime is not None and (now - tmtime) <= FRESH_SECS:
             return "busy"
-
-        # Alive, nothing fresh -> idle.
         return "idle"
 
     # -- the Protocol method ----------------------------------------------

@@ -63,6 +63,9 @@
 }
 .mos-seg button:hover { color: var(--text-primary); border-color: var(--border-c); }
 .mos-seg button[aria-pressed="true"] { background: var(--accent); color: var(--bg-void); border-color: var(--accent); }
+/* vertical-monitor (portrait) layout pill — same clanker pill, glyph + label */
+.mos-seg button.mos-vert-btn { letter-spacing: .02em; }
+.mos-seg button.mos-vert-btn::first-letter { letter-spacing: .12em; }
 
 .mos-bar .mos-mode {
   font-family: var(--mono); font-size: 11px; color: var(--text-muted);
@@ -91,9 +94,17 @@
 
 /* ============================================================ the grid
  * FILLS the stage (width + height). data-layout drives the track template so
- * tiles always tile the full viewport: 1=1col, 2=2col, 4=2x2, 6=3x2. */
+ * tiles always tile the full viewport: 1=1col, 2=2col, 4=2x2, 6=3x2.
+ *
+ * position:relative — mosaic.js overlays absolutely-positioned drag gutters
+ * (.mos-track-gutter) ON the grid at each internal track boundary; the grid is
+ * their containing block. Track sizes themselves are driven by INLINE
+ * grid-template-{columns,rows} (fr weights mosaic.js writes + persists); the
+ * [data-layout]/[data-cols]/[data-rows] rules below are the static fallback that
+ * paints correctly before/without JS sizing. */
 .mos-grid {
   flex: 1 1 auto; min-height: 0; min-width: 0;
+  position: relative;
   display: grid;
   gap: var(--mos-gap);
   background: var(--bg-void);
@@ -102,6 +113,46 @@
 .mos-grid[data-layout="2"] { grid-template-columns: 1fr 1fr;        grid-template-rows: 1fr; }
 .mos-grid[data-layout="4"] { grid-template-columns: 1fr 1fr;        grid-template-rows: 1fr 1fr; }
 .mos-grid[data-layout="6"] { grid-template-columns: repeat(3, 1fr); grid-template-rows: 1fr 1fr; }
+
+/* portrait-aware fallback: mosaic.js sets data-cols/data-rows to the EFFECTIVE
+ * (orientation-remapped) track counts. These generic rules keep the static
+ * template right when the viewport is portrait (2-up → 1×2, 6-up → 2×3, …) for
+ * the moment before JS writes inline fr weights. */
+.mos-grid[data-cols="1"] { grid-template-columns: 1fr; }
+.mos-grid[data-cols="2"] { grid-template-columns: 1fr 1fr; }
+.mos-grid[data-cols="3"] { grid-template-columns: repeat(3, 1fr); }
+.mos-grid[data-rows="1"] { grid-template-rows: 1fr; }
+.mos-grid[data-rows="2"] { grid-template-rows: 1fr 1fr; }
+.mos-grid[data-rows="3"] { grid-template-rows: repeat(3, 1fr); }
+
+/* ---- vertical-monitor layout (portrait stack) ----
+ * A single column of stacked rows that fills the height. mosaic.js writes the
+ * exact row count (data-rows) + inline fr weights; if more sessions than fit it
+ * scrolls. min row height keeps tiles legible when many stack. */
+.mos-grid[data-layout="vert"] {
+  grid-template-columns: 1fr;
+  grid-auto-rows: minmax(160px, 1fr);
+  overflow-y: auto; overflow-x: hidden;
+}
+
+/* ============================================================ resize gutters
+ * Internal TRACK gutters are absolute overlays on the grid (so they don't take a
+ * grid cell or disturb tile counting / :not(.is-max) selectors). mosaic.js sets
+ * left/top inline; we own width/height + cursor. Base look comes from resize.js
+ * (.wyc-gutter*), but those are flex-item sized — override for the overlay. */
+.mos-grid .mos-track-gutter { position: absolute; z-index: 6; }
+.mos-grid .mos-track-gutter.mos-track-col {
+  top: 0; bottom: 0; height: auto; align-self: auto;
+  width: 8px; transform: translateX(-50%);
+}
+.mos-grid .mos-track-gutter.mos-track-row {
+  left: 0; right: 0; width: auto; justify-self: auto;
+  height: 8px; transform: translateY(-50%);
+}
+
+/* the rail gutter is a normal flex child between the grid and the rail */
+.mos-stage > .mos-rail-gutter { flex: 0 0 auto; }
+.mos-stage > .mos-rail-gutter.hidden { display: none; }
 
 /* density: compact/cozy/roomy nudge chrome + gap */
 .mosaic[data-density="compact"] { --tile-chrome-h: 28px; --fanout-h: 24px; --mos-gap: 2px; }
@@ -133,6 +184,18 @@
   font-family: var(--mono); font-size: 9px; letter-spacing: .15em;
   color: var(--accent-amber); border: 1px solid var(--accent-amber);
   padding: 2px 6px; background: var(--bg-void); z-index: 5;
+}
+
+/* actively-editing emphasis: a thread GENERATING CODE right now (latest edit/write
+ * within the active window) gets a 2px accent cap so the eye goes to where code is
+ * being written. A subtle ✎ pulses on the tile title. Subordinate to focus/pin
+ * borders (those set border-color; this only paints the TOP edge). */
+.mos-tile.is-editing { border-top: 2px solid var(--accent); }
+.mos-tile.is-editing .mos-tile-chrome { padding-top: 0; }
+.mos-tile.is-editing .t-title::before {
+  content: "\270E"; /* ✎ */
+  color: var(--accent); margin-right: 5px; font-size: 12px;
+  display: inline-block; animation: pulse 1.6s infinite;
 }
 
 /* tile chrome (header bar) — sub-panel, 1px bottom border */
@@ -282,6 +345,14 @@
   overflow: hidden;
 }
 .mos-rail.hidden { display: none; }
+/* width is driven inline by the rail-resize gutter (clamped 140–420px in JS).
+ * collapsing transitions the width to 0; collapsed pins it shut. */
+.mos-rail { transition: width .12s ease; }
+.mos-rail.mos-rail-collapsing,
+.mos-rail.mos-rail-collapsed {
+  width: 0 !important; min-width: 0; border-width: 0; overflow: hidden;
+}
+.mos-rail.mos-rail-collapsing { transition: none; }
 .mos-rail-hdr {
   flex: 0 0 auto;
   display: flex; align-items: center; gap: 6px;
@@ -477,10 +548,17 @@
 @media (max-width: 820px) {
   .mos-bar { display: none; }              /* hide the multi-up layout buttons */
   .mos-rail { display: none !important; }
+  /* single-tile on mobile → no pane resizing; hide every drag gutter so a
+     reflow-built track gutter can't float over the one visible tile. */
+  .mos-rail-gutter,
+  .mos-grid .mos-track-gutter { display: none !important; }
   .mos-stage { flex-direction: column; padding: var(--mos-gap); }
 
   .mos-grid,
-  .mos-grid[data-layout] { grid-template-columns: 1fr !important; grid-template-rows: 1fr !important; }
+  .mos-grid[data-layout] {
+    grid-template-columns: 1fr !important; grid-template-rows: 1fr !important;
+    grid-auto-rows: 1fr !important; overflow: hidden !important;
+  }
   .mos-grid > .mos-tile:not(.is-mobile-active) { display: none; }
 
   /* top mobile nav: prev / thread label+pager / next — touch sized */

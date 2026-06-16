@@ -86,9 +86,24 @@ const EXT_LANG = {
   yml: 'yaml', yaml: 'yaml',
 };
 
+import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js';
+
 const MAX_TABS = 8;
 const TYPEWRITER_BUDGET_MS = 600;   // total time we allow the hunk reveal to take
 const TYPEWRITER_MAX_CHARS = 400;   // never animate more than this (honesty: edits are hunks)
+
+/* ---- resizer layout (#2): the .ide grid gains explicit gutter tracks so the
+ * user can drag tree↔editor (vertical, col-resize) and editor↔terminal
+ * (horizontal, row-resize). Persisted to localStorage. Clamp bounds + defaults
+ * below; the grid-template is rebuilt from {treeW, termH} on every drag tick. */
+const LAYOUT_KEY = 'wyc.ide.layout.v1';
+const GUTTER_PX = 6;
+const TREE_W_DEFAULT = 150;   // #3: narrower default tree
+const TREE_W_MIN = 80;
+const TREE_W_MAX = 460;
+const TERM_H_DEFAULT = 200;   // bottom terminal default height (px)
+const TERM_H_MIN = 60;        // clamp floor
+const TERM_FRAC_MAX = 0.60;   // terminal may take at most 60% of grid height
 
 /* ============================================================ tiny helpers */
 function el(tag, cls, text) {
@@ -291,8 +306,86 @@ export function mountIdePane(mountEl, store, opts = {}) {
   rawBtn.type = 'button';
   statusBar.append(stDot, stClaude, stSpacer, stSub, stModel, stTmux, rawBtn);
 
-  root.append(treePane, editorPane, termPane, screenPane, statusBar);
+  // --- resize gutters (#2). They live as real grid children so they occupy the
+  // gutter tracks added to grid-template-{columns,rows}. gCol sits between
+  // tree|editor (drag x); gRow sits between editor|terminal (drag y).
+  // Placement is line-based via the .ide-gutter-col / .ide-gutter-row CSS rules
+  // (which agree with the explicit track template JS sets below). We deliberately
+  // do NOT set grid-area here: the .ide grid uses numbered tracks, not named
+  // areas, so a named grid-area would silently fail to place.
+  const gCol = makeGutter('x');
+  gCol.classList.add('ide-gutter', 'ide-gutter-col');
+  gCol.title = 'drag to resize · double-click to reset';
+  const gRow = makeGutter('y');
+  gRow.classList.add('ide-gutter', 'ide-gutter-row');
+  gRow.title = 'drag to resize · double-click to reset';
+
+  root.append(treePane, gCol, editorPane, gRow, termPane, screenPane, statusBar);
   mountEl.append(root);
+
+  /* -------------------------------------------------- layout (resizer) state */
+  // Current layout sizes (px). Restored from localStorage on mount; written back
+  // (debounced) on drag end. The grid-template is recomputed from these.
+  let treeW = TREE_W_DEFAULT;
+  let termH = TERM_H_DEFAULT;
+  (function restoreLayout() {
+    const s = loadSizes(LAYOUT_KEY);
+    if (s && typeof s.treeW === 'number' && isFinite(s.treeW)) treeW = clamp(s.treeW, TREE_W_MIN, TREE_W_MAX);
+    if (s && typeof s.termH === 'number' && isFinite(s.termH)) termH = Math.max(TERM_H_MIN, s.termH);
+  })();
+
+  // Build & apply grid-template-columns/rows from the current treeW / termH.
+  // Layout:  [tree treeW] [gutter 6px] [editor 1fr]   (columns)
+  //          [editor 1fr] [gutter 6px] [terminal termH] [status auto]  (rows)
+  // Status row spans all 3 columns; raw-screen overlay is absolute so it's free.
+  function applyGridTemplate() {
+    const gridH = root.clientHeight || 0;
+    // clamp the terminal so it can't swallow the editor: <= 60% of grid height
+    const maxTerm = gridH > 0 ? Math.max(TERM_H_MIN, Math.floor(gridH * TERM_FRAC_MAX)) : Infinity;
+    const th = clamp(termH, TERM_H_MIN, maxTerm);
+    const tw = clamp(treeW, TREE_W_MIN, TREE_W_MAX);
+    root.style.gridTemplateColumns = `${tw}px ${GUTTER_PX}px minmax(0, 1fr)`;
+    root.style.gridTemplateRows = `minmax(0, 1fr) ${GUTTER_PX}px ${th}px auto`;
+  }
+  applyGridTemplate();
+
+  // tree ↔ editor (vertical gutter, drag x)
+  let dragStartTreeW = treeW;
+  attachDrag(gCol, {
+    axis: 'x',
+    onStart: () => { dragStartTreeW = treePane.getBoundingClientRect().width; },
+    onDelta: (dx) => { treeW = clamp(dragStartTreeW + dx, TREE_W_MIN, TREE_W_MAX); applyGridTemplate(); },
+    onEnd: () => { saveSizes(LAYOUT_KEY, { treeW, termH }); },
+  });
+  gCol.addEventListener('dblclick', () => {
+    treeW = TREE_W_DEFAULT; applyGridTemplate(); saveSizes(LAYOUT_KEY, { treeW, termH });
+  });
+
+  // editor ↔ terminal (horizontal gutter, drag y). Dragging DOWN grows the
+  // editor / shrinks the terminal, so the terminal height moves by -dy.
+  let dragStartTermH = termH;
+  attachDrag(gRow, {
+    axis: 'y',
+    onStart: () => { dragStartTermH = termPane.getBoundingClientRect().height; },
+    onDelta: (dy) => {
+      const gridH = root.clientHeight || 0;
+      const maxTerm = gridH > 0 ? Math.max(TERM_H_MIN, Math.floor(gridH * TERM_FRAC_MAX)) : Infinity;
+      termH = clamp(dragStartTermH - dy, TERM_H_MIN, maxTerm);
+      applyGridTemplate();
+    },
+    onEnd: () => { saveSizes(LAYOUT_KEY, { treeW, termH }); },
+  });
+  gRow.addEventListener('dblclick', () => {
+    termH = TERM_H_DEFAULT; applyGridTemplate(); saveSizes(LAYOUT_KEY, { treeW, termH });
+  });
+
+  // Re-clamp the terminal height if the pane is resized (keeps the 60% ceiling
+  // honest when the surrounding tile shrinks). Tolerate absence of RO.
+  let layoutRO = null;
+  if (typeof ResizeObserver !== 'undefined') {
+    layoutRO = new ResizeObserver(() => { if (!destroyed) applyGridTemplate(); });
+    try { layoutRO.observe(root); } catch (_) { layoutRO = null; }
+  }
 
   /* -------------------------------------------------- mutable view state */
   let destroyed = false;
@@ -319,6 +412,10 @@ export function mountIdePane(mountEl, store, opts = {}) {
   const fileCache = new Map();
   /** @type {Map<string, Promise<any>>} */
   const fileInflight = new Map();
+  // per-path fetch generation: a forced re-fetch bumps it so a slower, EARLIER
+  // request can't clobber the cache with stale content after a newer edit landed.
+  /** @type {Map<string, number>} */
+  const fileGen = new Map();
   let fetchToken = 0;                 // bumps to cancel stale async editor swaps
 
   // tree: signature-gated rebuild + per-file row reuse
@@ -339,6 +436,16 @@ export function mountIdePane(mountEl, store, opts = {}) {
 
   // auto-switch bookkeeping: the highest edit/write seq we've already reacted to
   let lastEditSeq = 0;
+
+  // ---- follow-lines (#1) state -------------------------------------------
+  // When Claude edits the open file we SCROLL TO + FLASH the changed region and
+  // keep following each new edit. The user can scroll away to pause; a chip lets
+  // them resume. `followPaused` gates auto-scroll (flash still happens).
+  let followPaused = false;
+  let lastFollowLine = 0;          // last line we auto-scrolled the editor to
+  let suppressScrollWatch = false; // ignore scroll events we trigger ourselves
+  let followRAF = 0;               // rAF handle for the next follow tick
+  let followChip = null;           // the "following paused — click to resume" chip
   // raw screen
   let rawOn = false;
   let watchedScreenSession = null;
@@ -421,74 +528,179 @@ export function mountIdePane(mountEl, store, opts = {}) {
     editorWrap.append(cm.view.dom);
   }
 
-  // render content via the highlighted <pre> fallback (no CM)
-  function renderFallback(path, content, focusLine) {
+  // render content via the highlighted <pre> fallback (no CM). This path renders
+  // headless, so following MUST be correct here: we scroll the fallback's own
+  // scroll container to the target line, flash it, and bind a manual-scroll watch.
+  function renderFallback(path, content, focusLine, follow) {
     if (editorEmpty.parentNode) editorEmpty.remove();
     if (cm && cm.view.dom.parentNode) cm.view.dom.remove();
     if (!fallbackEl) {
       fallbackEl = el('pre', 'editor-fallback');
       const note = el('div', 'editor-fallback-note', 'editor offline · highlighted plain view');
       editorWrap.append(note, fallbackEl);
+      bindFallbackScrollWatch();
     }
     fallbackEl.innerHTML = '';
     const lines = String(content == null ? '' : content).split('\n');
     const frag = document.createDocumentFragment();
     for (let i = 0; i < lines.length; i++) {
-      const lineEl = el('span', i + 1 === focusLine ? 'wyc-hunk-flash' : null);
+      const lineEl = el('span', 'efline');
       lineEl.append(el('span', 'ln', String(i + 1)));
       lineEl.append(document.createTextNode(lines[i] + '\n'));
       frag.append(lineEl);
     }
     fallbackEl.append(frag);
-    // scroll to focus line
-    if (focusLine && focusLine > 1) {
-      const target = fallbackEl.children[focusLine - 1];
-      if (target && target.scrollIntoView) {
-        try { target.scrollIntoView({ block: 'center' }); } catch (_) {}
+
+    if (focusLine && focusLine > 0) {
+      const idx = Math.max(1, Math.min(focusLine, lines.length));
+      const target = fallbackEl.children[idx - 1];
+      // ALWAYS flash the changed line (re-trigger the animation by reflow)
+      if (target) {
+        target.classList.remove('wyc-hunk-flash', 'wyc-hunk-line');
+        void target.offsetWidth;
+        target.classList.add('wyc-hunk-flash', 'wyc-hunk-line');
+        setTimeout(() => { target.classList.remove('wyc-hunk-flash'); }, 1600);
+        setTimeout(() => { target.classList && target.classList.remove('wyc-hunk-line'); }, 2400);
+      }
+      // auto-SCROLL the container only when following (honors the pause state)
+      if (follow && !followPaused) {
+        lastFollowLine = idx;
+        scrollFallbackToLine(idx, false);
       }
     }
   }
 
+  // Scroll the fallback container so `line` (1-based) is vertically centered.
+  // We compute the offset directly (scrollIntoView on a child can scroll the
+  // whole page) so this is exercised correctly headless.
+  function scrollFallbackToLine(line, forceUnpause) {
+    if (!fallbackEl) return;
+    const idx = Math.max(1, Math.min(line, fallbackEl.children.length));
+    const target = fallbackEl.children[idx - 1];
+    if (!target) return;
+    if (forceUnpause) followPaused = false;
+    suppressScrollWatch = true;
+    try {
+      const want = target.offsetTop - (fallbackEl.clientHeight / 2) + (target.offsetHeight / 2);
+      fallbackEl.scrollTop = Math.max(0, want);
+    } catch (_) {}
+    setTimeout(() => { suppressScrollWatch = false; }, 120);
+  }
+
+  // Manual-scroll watch for the fallback: pause follow when the latest edit line
+  // scrolls out of view, resume when it returns near the center.
+  let fallbackScrollBound = false;
+  function bindFallbackScrollWatch() {
+    if (fallbackScrollBound || !fallbackEl) return;
+    fallbackScrollBound = true;
+    fallbackEl.addEventListener('scroll', () => {
+      if (suppressScrollWatch || destroyed || !fallbackEl) return;
+      onUserScroll(() => {
+        if (!lastFollowLine) return true;
+        const idx = Math.max(1, Math.min(lastFollowLine, fallbackEl.children.length));
+        const target = fallbackEl.children[idx - 1];
+        if (!target) return true;
+        const top = fallbackEl.scrollTop;
+        const vh = fallbackEl.clientHeight;
+        return target.offsetTop >= top - 40 && (target.offsetTop + target.offsetHeight) <= top + vh + 40;
+      });
+    }, { passive: true });
+  }
+
+  // ---- locate-by-hunk (#1) ------------------------------------------------
+  // The backend usually leaves Activity.line null, so we LOCATE the edit in the
+  // freshly-fetched content ourselves: take the first substantive (non-blank)
+  // line of hunk_new, trimmed, and string-match it in `content`. Prefer the
+  // occurrence NEAREST to the hint line (Activity.line), else the LAST occurrence
+  // (a write/append edit's new content is usually toward the end of the file).
+  // Returns a 1-based line number, or the hint (or 1) if we can't find it.
+  function locateHunkLine(content, hunkNew, hint) {
+    const hintLine = (typeof hint === 'number' && hint > 0) ? hint : 0;
+    if (typeof content !== 'string' || !content) return hintLine || 1;
+    const lines = content.split('\n');
+    // first substantive line of the new hunk
+    let needle = '';
+    if (typeof hunkNew === 'string' && hunkNew) {
+      for (const raw of hunkNew.split('\n')) {
+        const t = raw.trim();
+        if (t) { needle = t; break; }
+      }
+    }
+    if (!needle) return hintLine || 1;
+    // collect every line index whose trimmed text contains the needle (cheap,
+    // robust to leading-indent differences between hunk + file).
+    const hits = [];
+    for (let i = 0; i < lines.length; i++) {
+      const lt = lines[i].trim();
+      if (lt && (lt === needle || lt.indexOf(needle) >= 0)) hits.push(i + 1);
+    }
+    if (!hits.length) return hintLine || 1;
+    if (hits.length === 1) return hits[0];
+    // multiple matches: pick the one nearest the hint if we have one, else last.
+    if (hintLine) {
+      let best = hits[0], bestD = Math.abs(hits[0] - hintLine);
+      for (const h of hits) { const d = Math.abs(h - hintLine); if (d < bestD) { bestD = d; best = h; } }
+      return best;
+    }
+    return hits[hits.length - 1];
+  }
+
   // Set the editor's document to `content` for `path`, choose the language, then
   // (optionally) scroll-to + flash the hunk line, and typewriter-reveal newHunk.
-  async function showFileInEditor(path, content, focusLine, hunkNew) {
+  async function showFileInEditor(path, content, focusLine, hunkNew, follow) {
     const myToken = ++fetchToken;
+    const doc = String(content == null ? '' : content);
+    // LOCATE the change ourselves (Activity.line is usually null): match the
+    // first substantive line of hunk_new in the freshly-fetched content. The
+    // passed focusLine is only a hint.
+    const targetLine = (hunkNew != null)
+      ? locateHunkLine(doc, hunkNew, focusLine)
+      : (focusLine && focusLine > 0 ? focusLine : 0);
+
     await ensureEditor();
     if (destroyed || myToken !== fetchToken) return; // a newer swap superseded us
 
     if (cmFailed || !cm) {
-      renderFallback(path, content, focusLine);
+      renderFallback(path, doc, targetLine, follow);
       return;
     }
     attachCmDom();
+    bindCmScrollWatch();
     const langExt = await langExtFor(path);
     if (destroyed || myToken !== fetchToken) return;
 
     const { view, EditorState, langCompartment, baseExts } = cm;
-    const doc = String(content == null ? '' : content);
     // full reset of doc + language (cheap; we only do this on a file switch / re-edit)
     view.setState(EditorState.create({ doc, extensions: [langCompartment.of(langExt), ...baseExts] }));
 
-    // scroll to + flash the changed line
-    if (focusLine && focusLine > 0) {
-      flashAndScrollCm(focusLine, hunkNew);
+    // scroll to + flash the changed line (auto-follow honors the pause state)
+    if (targetLine && targetLine > 0) {
+      flashAndScrollCm(targetLine, hunkNew, follow);
     }
   }
 
-  // Scroll to a line in CM, add a transient flash decoration, and run the
-  // honest typewriter reveal of the hunk text if it's small enough.
-  function flashAndScrollCm(line, hunkNew) {
+  // Scroll to a line in CM (when following), and add a transient flash
+  // decoration on the changed line. We ALWAYS flash so the eye catches the edit
+  // even while follow is paused; we only auto-SCROLL when follow is active.
+  function flashAndScrollCm(line, hunkNew, follow) {
     if (!cm) return;
     const { view } = cm;
     try {
       const total = view.state.doc.lines;
       const ln = Math.max(1, Math.min(line, total));
       const pos = view.state.doc.line(ln).from;
-      view.dispatch({ effects: cm.EditorView.scrollIntoView(pos, { y: 'center' }) });
+      if (follow && !followPaused) {
+        lastFollowLine = ln;
+        suppressScrollWatch = true;            // ignore the scroll we cause
+        view.dispatch({ effects: cm.EditorView.scrollIntoView(pos, { y: 'center' }) });
+        // release the self-scroll guard after CM settles (covers the rAF + layout)
+        setTimeout(() => { suppressScrollWatch = false; }, 120);
+      }
       // flash the line via a DOM class on the rendered .cm-line (simple + dep-free)
       requestAnimationFrame(() => {
-        const lineBlock = view.lineBlockAt(pos);
-        const dom = view.domAtPos(lineBlock.from);
+        let lineBlock, dom;
+        try { lineBlock = view.lineBlockAt(pos); dom = view.domAtPos(lineBlock.from); }
+        catch (_) { return; }                  // line not in viewport (paused, far away)
         let node = dom && dom.node;
         while (node && node.nodeType === 3) node = node.parentNode;
         while (node && !(node.classList && node.classList.contains('cm-line'))) node = node.parentNode;
@@ -505,17 +717,97 @@ export function mountIdePane(mountEl, store, opts = {}) {
     // inserting characters into the (read-only) doc.
   }
 
-  /* ==================================================================== files */
-  function fileUrl(path) {
-    const t = getToken();
-    return `/file?path=${encodeURIComponent(path)}${t ? `&token=${encodeURIComponent(t)}` : ''}`;
+  // ---- manual-override chip (#1) -----------------------------------------
+  // Show/hide a small "following paused — click to resume" chip in the editor.
+  function showFollowChip() {
+    if (followChip) { followChip.classList.add('on'); return; }
+    followChip = el('button', 'wyc-follow-chip on', 'following paused — click to resume');
+    followChip.type = 'button';
+    followChip.title = 'resume auto-follow of Claude’s edits';
+    followChip.addEventListener('click', (e) => { e.stopPropagation(); resumeFollow(true); });
+    editorWrap.append(followChip);
+  }
+  function hideFollowChip() { if (followChip) followChip.classList.remove('on'); }
+
+  function pauseFollow() {
+    if (followPaused) return;
+    followPaused = true;
+    showFollowChip();
+  }
+  // Resume following. If `jump` and we know the last edit line, scroll back to it.
+  function resumeFollow(jump) {
+    followPaused = false;
+    hideFollowChip();
+    if (jump && lastFollowLine > 0) {
+      if (cm && cm.view && cm.view.dom.parentNode === editorWrap) {
+        try {
+          const total = cm.view.state.doc.lines;
+          const ln = Math.max(1, Math.min(lastFollowLine, total));
+          const pos = cm.view.state.doc.line(ln).from;
+          suppressScrollWatch = true;
+          cm.view.dispatch({ effects: cm.EditorView.scrollIntoView(pos, { y: 'center' }) });
+          setTimeout(() => { suppressScrollWatch = false; }, 120);
+        } catch (_) {}
+      } else if (fallbackEl && fallbackEl.parentNode) {
+        scrollFallbackToLine(lastFollowLine, true);
+      }
+    }
   }
 
-  // fetch (with cache + de-dup). force=true bypasses cache (re-edit of open file).
+  // Watch the CM scroller for a MANUAL scroll: if the user drifts away from the
+  // latest edit line, pause follow; if they scroll back near it, auto-resume.
+  let cmScrollBound = false;
+  function bindCmScrollWatch() {
+    if (cmScrollBound || !cm || !cm.view) return;
+    const scroller = cm.view.scrollDOM;
+    if (!scroller) return;
+    cmScrollBound = true;
+    scroller.addEventListener('scroll', () => {
+      if (suppressScrollWatch || destroyed || !cm) return;
+      onUserScroll(() => {
+        // is the last-followed line still roughly centered/visible?
+        if (!lastFollowLine) return true;
+        try {
+          const ln = Math.max(1, Math.min(lastFollowLine, cm.view.state.doc.lines));
+          const block = cm.view.lineBlockAt(cm.view.state.doc.line(ln).from);
+          const top = cm.view.scrollDOM.scrollTop;
+          const vh = cm.view.scrollDOM.clientHeight;
+          return block.top >= top - 40 && block.bottom <= top + vh + 40;
+        } catch (_) { return true; }
+      });
+    }, { passive: true });
+  }
+
+  // Common manual-scroll handler: pause when the edit scrolls out of view,
+  // resume (no jump) when it comes back near. `isLatestVisible` returns bool.
+  function onUserScroll(isLatestVisible) {
+    const visible = isLatestVisible();
+    if (!visible && !followPaused) pauseFollow();
+    else if (visible && followPaused) resumeFollow(false);
+  }
+
+  /* ==================================================================== files */
+  function fileUrl(path, bust) {
+    const t = getToken();
+    // On a forced re-fetch (live edit) add a cache-buster so the browser/proxy
+    // can't hand us a stale copy of the file we just saw change.
+    const b = bust ? `&_=${Date.now()}` : '';
+    return `/file?path=${encodeURIComponent(path)}${t ? `&token=${encodeURIComponent(t)}` : ''}${b}`;
+  }
+
+  // fetch (with cache + de-dup). force=true bypasses cache + cache-busts the URL
+  // (re-edit of the open file). A forced fetch also overrides any inflight cached
+  // fetch so we don't reuse a request issued before the edit landed.
   function fetchFile(path, force) {
     if (!force && fileCache.has(path)) return Promise.resolve(fileCache.get(path));
-    if (fileInflight.has(path)) return fileInflight.get(path);
-    const p = fetch(fileUrl(path), { headers: { Accept: 'application/json' } })
+    if (!force && fileInflight.has(path)) return fileInflight.get(path);
+    // bump this path's generation; only the LATEST generation may write the cache,
+    // so a slow earlier fetch that resolves after a newer forced one can't clobber
+    // fresh content with stale (the live-follow re-fetch path depends on this).
+    const gen = (fileGen.get(path) || 0) + 1;
+    fileGen.set(path, gen);
+    const isLatest = () => fileGen.get(path) === gen;
+    const p = fetch(fileUrl(path, force), { cache: force ? 'no-store' : 'default', headers: { Accept: 'application/json' } })
       .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then((j) => {
         const rec = {
@@ -526,18 +818,17 @@ export function mountIdePane(mountEl, store, opts = {}) {
           recon: false,
           ts: Date.now(),
         };
-        fileCache.set(path, rec);
-        fileInflight.delete(path);
+        if (isLatest()) { fileCache.set(path, rec); fileInflight.delete(path); }
         return rec;
       })
       .catch((e) => {
-        fileInflight.delete(path);
+        if (isLatest()) fileInflight.delete(path);
         // fall back to reconstructing from activity hunks, else a placeholder
         const rec = reconstructFromHunks(path) || {
           content: `// ${baseName(path)}\n// (could not load file: ${e && e.message ? e.message : e})\n// ${path}`,
           lines: null, redacted: false, truncated: false, recon: true, ts: Date.now(),
         };
-        fileCache.set(path, rec);
+        if (isLatest()) fileCache.set(path, rec);
         return rec;
       });
     fileInflight.set(path, p);
@@ -569,17 +860,24 @@ export function mountIdePane(mountEl, store, opts = {}) {
   }
 
   // Open a file in the editor (used by both auto-switch and manual tree clicks).
+  // opts2.follow = this is a LIVE edit we should auto-scroll to (auto-switch);
+  // a manual tree/tab click opens without forcing a follow-scroll.
   function openFile(path, focusLine, opts2 = {}) {
     if (!path) return;
+    // Switching to a different file resets the follow anchor (the old line# is
+    // meaningless in the new file) and clears any stale "paused" chip. A
+    // follow-driven open re-establishes the anchor below.
+    if (path !== activeTab) { lastFollowLine = 0; followPaused = false; hideFollowChip(); }
     addTab(path, !!opts2.flash);
     setActiveTab(path);
     updateEditorMeta(path);
     const force = !!opts2.force;
     const hunkNew = opts2.hunkNew || null;
+    const follow = !!opts2.follow;
     fetchFile(path, force).then((rec) => {
       if (destroyed || activeTab !== path) return; // user/auto moved on
       updateEditorMeta(path, rec);
-      showFileInEditor(path, rec.content, focusLine, hunkNew);
+      showFileInEditor(path, rec.content, focusLine, hunkNew, follow);
     });
   }
 
@@ -684,8 +982,10 @@ export function mountIdePane(mountEl, store, opts = {}) {
     epath.textContent = '';
     for (const b of [...editorMeta.querySelectorAll('.badge')]) b.remove();
     if (cm && cm.view.dom.parentNode) cm.view.dom.remove();
-    if (fallbackEl && fallbackEl.parentNode) { fallbackEl.remove(); fallbackEl = null; }
+    if (fallbackEl && fallbackEl.parentNode) { fallbackEl.remove(); fallbackEl = null; fallbackScrollBound = false; }
     if (!editorEmpty.parentNode) editorWrap.append(editorEmpty);
+    // reset follow state (no file = nothing to follow)
+    followPaused = false; lastFollowLine = 0; hideFollowChip();
   }
 
   /* ==================================================================== thread helpers */
@@ -796,7 +1096,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     for (const name of dirNames) {
       const dpath = prefix ? prefix + '/' + name : name;
       const row = el('div', 'tree-node dir');
-      row.style.paddingLeft = (8 + depth * 13) + 'px';
+      row.style.paddingLeft = (6 + depth * 10) + 'px';   // #3: smaller indent step
       row.append(el('span', 'tw-twist', '▾'), el('span', 'tw-icon', '▸'), el('span', 'tw-name', name));
       row.title = dpath;
       const childWrap = el('div', 'tree-children');
@@ -814,7 +1114,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     for (const name of fileNames) {
       const full = node[name].__file;
       const row = el('div', 'tree-node file');
-      row.style.paddingLeft = (8 + depth * 13) + 'px';
+      row.style.paddingLeft = (6 + depth * 10) + 'px';   // #3: smaller indent step
       row.append(el('span', 'tw-twist', ''), el('span', 'tw-icon', iconGlyph(full)),
         el('span', 'tw-name', name), el('span', 'tw-dot'));
       row.title = full;
@@ -1013,12 +1313,16 @@ export function mountIdePane(mountEl, store, opts = {}) {
     // edits a file again (pin yields to live activity, per spec: "pins until
     // auto-follow resumes").
     pinned = false; pinnedPath = null;
+    // A genuinely-new live edit re-engages follow: snap back to the live edit
+    // even if the user had scrolled away (clears the manual-override pause).
+    followPaused = false; hideFollowChip();
 
     const path = target.file_path;
-    const line = target.line || 1;
+    const line = (typeof target.line === 'number' && target.line > 0) ? target.line : 0; // hint only
     // a new edit to a file we've shown means its cached content is stale: re-fetch
+    // (cache-bust). For a file we've never opened, the first fetch is fine.
     const force = fileCache.has(path);
-    openFile(path, line, { flash: true, force, hunkNew: target.hunk_new });
+    openFile(path, line, { flash: true, force, hunkNew: target.hunk_new, follow: true });
   }
 
   /* ==================================================================== render loop */
@@ -1056,12 +1360,14 @@ export function mountIdePane(mountEl, store, opts = {}) {
     lastEditSeq = 0;
     treeSig = '';
     pinned = false; pinnedPath = null;
+    followPaused = false; lastFollowLine = 0; hideFollowChip();
     activeTab = null;
     tabs = [];
     tabEls.clear();
     tabbar.innerHTML = '';
     fileCache.clear();
     fileInflight.clear();
+    fileGen.clear();
     touchedAt.clear();
     collapsedDirs.clear();
     termBlocks.clear();
@@ -1075,6 +1381,8 @@ export function mountIdePane(mountEl, store, opts = {}) {
   function destroy() {
     destroyed = true;
     try { unsub(); } catch (_) {}
+    if (layoutRO) { try { layoutRO.disconnect(); } catch (_) {} layoutRO = null; }
+    if (followRAF) { try { cancelAnimationFrame(followRAF); } catch (_) {} followRAF = 0; }
     if (rawOn) {
       const client = getClient();
       if (client && typeof client.unwatchScreen === 'function' && watchedScreenSession) {
@@ -1089,6 +1397,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     termBlocks.clear();
     fileCache.clear();
     fileInflight.clear();
+    fileGen.clear();
     mountEl.innerHTML = '';
   }
 
