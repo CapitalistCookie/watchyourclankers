@@ -191,6 +191,7 @@ import { termHForDrag, clampTermH } from './idegeom.js';
 import { revealFrames } from './reveal.js';
 import { readScanSteps, readRange } from './readscan.js';
 import { termCommandStep, termOutputTake } from './termpolicy.js';
+import { revealByLine } from './revealpolicy.js';
 
 const MAX_TABS = 8;
 
@@ -1187,7 +1188,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     // total chars in the changed region decides word- vs line-granularity.
     let totalChars = 0;
     for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) totalChars += (lines[li] || '').length;
-    const byLine = totalChars > CADENCE.LINE_CHARS;   // big hunk -> reveal line-by-line
+    const byLine = revealByLine(totalChars);   // CHAR-level unless TRULY massive (revealpolicy.js)
 
     // Build the ordered reveal plan: {li, chunk, lineEnd} steps. Per word for normal
     // hunks (split on whitespace boundaries, whitespace kept attached so words
@@ -1955,6 +1956,14 @@ export function mountIdePane(mountEl, store, opts = {}) {
         termFeed.append(block);
         b = { block, cmdEl, outEl, exitEl, srcChunks: 0, targetCmd: null, cmdShown: 0, pendingOut: '', exitReady: null, done: false };
         termBlocks.set(buf.ref_seq, b);
+        // SHOW ONLY THE LATEST command+output (operator): a real terminal shows the
+        // current command + its output, not a long scrollback. Evict prior blocks so
+        // the last command persists until a NEW one lands.
+        for (const [seq, old] of termBlocks) {
+          if (seq === buf.ref_seq) continue;
+          if (old.block && old.block.parentNode) old.block.remove();
+          termBlocks.delete(seq);
+        }
         // a brand-new command block: smoothly finish any block still revealing
         // (cancel-and-continue) so we never lag the live shell.
         accelerateTermRevealToFinish();
