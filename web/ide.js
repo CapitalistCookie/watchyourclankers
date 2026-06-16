@@ -86,6 +86,106 @@ const EXT_LANG = {
   yml: 'yaml', yaml: 'yaml',
 };
 
+/* ============================================================ hljs fallback HL
+ * The <pre> fallback (used when the CodeMirror CDN is blocked) is highlighted
+ * with the VENDORED highlight.js — it loads from our own /static so it ALWAYS
+ * works offline. We inject the UMD bundle + theme once, lazily, on first
+ * fallback render, and cache a ready Promise. Degrades to plain text on failure.
+ * Per-line highlighting (each .efline independently) keeps the follow-scroll /
+ * flash structure intact; multi-line constructs lose cross-line context, which
+ * is an accepted trade for keeping offsetTop-per-line meaningful. */
+const HLJS_SCRIPT_ID = 'wyc-hljs-script';
+const HLJS_THEME_ID = 'wyc-hljs-theme';
+const HLJS_SCRIPT_URL = '/static/vendor/highlight.min.js';
+const HLJS_THEME_URL = '/static/vendor/hljs-theme.css';
+
+// file-extension -> highlight.js language name. (Distinct from EXT_LANG, which
+// maps to CodeMirror lang-package keys; hljs uses its own registry names, e.g.
+// `xml` for HTML/SVG, `ini` for TOML.) Unknown/missing -> highlightAuto().
+const HLJS_EXT = {
+  py: 'python', pyi: 'python',
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+  ts: 'typescript', tsx: 'typescript',
+  json: 'json', jsonc: 'json',
+  sh: 'bash', bash: 'bash', zsh: 'bash',
+  md: 'markdown', markdown: 'markdown',
+  css: 'css', scss: 'css', less: 'css',
+  html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml', vue: 'xml',
+  yml: 'yaml', yaml: 'yaml',
+  toml: 'ini', ini: 'ini', cfg: 'ini',
+  rs: 'rust',
+  go: 'go',
+  c: 'cpp', h: 'cpp', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp',
+  sql: 'sql',
+  dockerfile: 'dockerfile',
+};
+// hljs language name for a path, or '' to fall back to highlightAuto.
+function hljsLangFor(path) {
+  const ext = extOf(path);
+  if (HLJS_EXT[ext]) return HLJS_EXT[ext];
+  // extensionless well-known files (e.g. "Dockerfile")
+  const base = baseName(path).toLowerCase();
+  if (base === 'dockerfile') return 'dockerfile';
+  return '';
+}
+
+// Cached ready Promise: resolves to window.hljs once loaded, or null on failure
+// (offline / asset missing / parse error). Injected once, guarded by element id.
+let _hljsReady = null;
+function ensureHljs() {
+  if (_hljsReady) return _hljsReady;
+  _hljsReady = new Promise((resolve) => {
+    try {
+      const w = /** @type {any} */ (typeof window !== 'undefined' ? window : null);
+      const doc = typeof document !== 'undefined' ? document : null;
+      if (!w || !doc || !doc.head) { resolve(null); return; }
+      if (w.hljs) { resolve(w.hljs); return; }    // already present somehow
+      // theme stylesheet — inject once (failure here is non-fatal: plain tokens)
+      if (!doc.getElementById(HLJS_THEME_ID)) {
+        const link = doc.createElement('link');
+        link.id = HLJS_THEME_ID;
+        link.rel = 'stylesheet';
+        link.href = HLJS_THEME_URL;
+        doc.head.appendChild(link);
+      }
+      // the UMD bundle — resolve on load, null on error (graceful degrade)
+      let script = doc.getElementById(HLJS_SCRIPT_ID);
+      if (script) {
+        // a previous mount already kicked the load; await its outcome
+        if (w.hljs) { resolve(w.hljs); return; }
+        script.addEventListener('load', () => resolve(w.hljs || null), { once: true });
+        script.addEventListener('error', () => resolve(null), { once: true });
+        return;
+      }
+      script = doc.createElement('script');
+      script.id = HLJS_SCRIPT_ID;
+      script.src = HLJS_SCRIPT_URL;
+      script.async = true;
+      script.addEventListener('load', () => resolve(w.hljs || null), { once: true });
+      script.addEventListener('error', (e) => { console.warn('[ide] vendored hljs load failed; plain fallback', e); resolve(null); }, { once: true });
+      doc.head.appendChild(script);
+    } catch (e) {
+      console.warn('[ide] hljs inject failed; plain fallback', e);
+      resolve(null);
+    }
+  });
+  return _hljsReady;
+}
+
+// Highlight one source line to token HTML. Returns null if we should keep the
+// caller's plain (escaped) text — empty line, no hljs, or hljs threw.
+function hljsLineHtml(hljs, lineText, lang) {
+  if (!hljs || lineText === '') return null;   // keep empty lines empty (height)
+  try {
+    if (lang && typeof hljs.getLanguage === 'function' && hljs.getLanguage(lang)) {
+      return hljs.highlight(lineText, { language: lang, ignoreIllegals: true }).value;
+    }
+    return hljs.highlightAuto(lineText).value;
+  } catch (_) {
+    return null;   // any hljs throw -> caller's plain escaped text
+  }
+}
+
 import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js';
 
 const MAX_TABS = 8;
@@ -397,6 +497,9 @@ export function mountIdePane(mountEl, store, opts = {}) {
   let cmFailed = false;
   const langCache = new Map();        // langKey -> resolved CM extension
   let fallbackEl = null;              // <pre> fallback element (if used)
+  // bumps on every fallback render so a pending async hljs highlight pass can
+  // detect it was superseded (live-edit re-render) and skip painting stale tokens
+  let fallbackHlGen = 0;
 
   // tabs: ordered most-recent-last; activeTab is the path shown.
   /** @type {string[]} */
@@ -540,16 +643,31 @@ export function mountIdePane(mountEl, store, opts = {}) {
       editorWrap.append(note, fallbackEl);
       bindFallbackScrollWatch();
     }
+    const myGen = ++fallbackHlGen;   // invalidate any in-flight highlight pass
     fallbackEl.innerHTML = '';
     const lines = String(content == null ? '' : content).split('\n');
+    // Each source line is its own .efline block (so offsetTop is meaningful for
+    // the follow-scroll, and the flash is a per-line block). The line text lives
+    // in a child .ef-code span so syntax highlighting (which rewrites .ef-code's
+    // innerHTML) never disturbs the .ln gutter or the trailing newline.
     const frag = document.createDocumentFragment();
+    /** @type {HTMLElement[]} */
+    const codeEls = [];
     for (let i = 0; i < lines.length; i++) {
       const lineEl = el('span', 'efline');
       lineEl.append(el('span', 'ln', String(i + 1)));
-      lineEl.append(document.createTextNode(lines[i] + '\n'));
+      const codeEl = el('span', 'ef-code');
+      codeEl.textContent = lines[i];     // plain text first — correct + layout-safe
+      lineEl.append(codeEl);
+      lineEl.append(document.createTextNode('\n'));
       frag.append(lineEl);
+      codeEls.push(codeEl);
     }
     fallbackEl.append(frag);
+    // Highlight each line once hljs is ready. We tag the rendered content with a
+    // gen token so a re-render (live edit re-fetch) that lands while a prior
+    // highlight pass is still pending can't paint stale tokens over new text.
+    highlightFallbackLines(path, lines, codeEls, myGen);
 
     if (focusLine && focusLine > 0) {
       const idx = Math.max(1, Math.min(focusLine, lines.length));
@@ -568,6 +686,23 @@ export function mountIdePane(mountEl, store, opts = {}) {
         scrollFallbackToLine(idx, false);
       }
     }
+  }
+
+  // Apply per-line hljs highlighting to an already-rendered fallback. Async: it
+  // awaits the lazily-injected (vendored) hljs, then rewrites each .ef-code span's
+  // innerHTML with token markup. Plain escaped text remains if hljs never loads,
+  // a line is empty, or hljs throws. `gen` guards against a newer fallback render
+  // (live-edit re-fetch) superseding this pass mid-flight.
+  function highlightFallbackLines(path, lines, codeEls, gen) {
+    ensureHljs().then((hljs) => {
+      if (!hljs || destroyed) return;             // graceful degrade -> plain text
+      if (gen !== fallbackHlGen || !fallbackEl) return; // superseded by a re-render
+      const lang = hljsLangFor(path);
+      for (let i = 0; i < codeEls.length; i++) {
+        const html = hljsLineHtml(hljs, lines[i], lang);
+        if (html != null) codeEls[i].innerHTML = html;  // null -> keep plain text
+      }
+    });
   }
 
   // Scroll the fallback container so `line` (1-based) is vertically centered.

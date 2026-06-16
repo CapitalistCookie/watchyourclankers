@@ -256,6 +256,24 @@
   color: var(--text-muted); user-select: none;
   text-align: right; padding-right: 1.1em;
 }
+/* the per-line code span whose innerHTML hljs rewrites with token markup. Inline
+ * + white-space inherit so it flows on the .efline (the .efline keeps offsetTop
+ * meaningful for the follow-scroll); the default color sits on --bg-void/--bg-deep
+ * until the vendored theme colors individual tokens. */
+.editor-fallback .ef-code { display: inline; color: var(--text-secondary); }
+/* hljs token markup highlighting (vendored gruvbox theme). The theme paints a
+ * background + block layout on `.hljs`; we never put that class on a line, but
+ * override defensively so a stray .hljs can't blot the editor bg or break the
+ * per-line flow. Token COLORS (.hljs-keyword/.hljs-string/…) come from the theme. */
+.editor-fallback .hljs,
+.efline .hljs {
+  background: transparent !important;
+  display: inline !important;
+  padding: 0 !important;
+  overflow: visible !important;
+}
+/* token spans stay inline so they never split a line or disturb the flash/scroll */
+.editor-fallback .ef-code span { background: transparent; }
 /* the just-edited line: persistent gutter accent (wyc-hunk-line) + a transient
  * background flash (wyc-hunk-flash). Both target the .efline block. */
 .editor-fallback .efline.wyc-hunk-flash { animation: hunkflash 1.6s ease-out; }
