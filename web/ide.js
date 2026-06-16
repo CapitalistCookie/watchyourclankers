@@ -189,14 +189,51 @@ function hljsLineHtml(hljs, lineText, lang) {
 import { attachDrag, makeGutter, loadSizes, saveSizes, clamp } from './resize.js';
 
 const MAX_TABS = 8;
-// FEATURE B (reveal) pacing. The reveal is no longer a "type a prefix then DUMP
-// the rest" animation — it's a steady in-place write that ACCELERATES for big
-// hunks and SETTLES gently, so the transition to "done" is imperceptible (never a
-// single full-screen snap). TYPEWRITER_BUDGET_MS is a soft ceiling we ease toward
-// (we speed up rather than hard-cut); TYPEWRITER_MAX_CHARS only switches a very
-// large hunk from per-word to whole-line reveal (still progressive, never a dump).
-const TYPEWRITER_BUDGET_MS = 900;   // soft target for the reveal; we accelerate, never cut
-const TYPEWRITER_MAX_CHARS = 600;   // above this, reveal line-by-line (still progressive)
+
+/* ============================================================ CADENCE (FEATURE B)
+ * The reveal is a SIMULATED typist: each edit lands as a COMPLETE block (the
+ * transcript has no sub-hunk keystroke stream), so we already hold the final text
+ * and just unveil it at a human, NON-uniform pace. Two ideas drive the feel:
+ *
+ *  (a) ORGANIC CADENCE — reveal by word/small-token on a comfortable base delay
+ *      with slight per-step JITTER (humans aren't metronomes), a gentle ease
+ *      in/out across the block, and MICRO-PAUSES at line breaks + after
+ *      punctuation. So it reads like someone typing, not a burst.
+ *
+ *  (b) RHYTHM-ADAPTIVE DURATION — the REAL rhythm is the gap BETWEEN blocks (the
+ *      model thinking between tool calls), often several seconds. We estimate the
+ *      recent median inter-edit gap and spend a comfortable FRACTION of it typing,
+ *      clamped to [MIN_MS, MAX_MS]. Sparse edits ⇒ leisurely; dense edits ⇒
+ *      quicker. We NEVER lag reality: a new edit mid-reveal smoothly speeds the
+ *      current block to the finish (cancel-and-continue), then starts the new one.
+ *
+ * These are deliberately gathered here so the feel is easy to tweak later. All
+ * durations are milliseconds. The same tunables pace the TERMINAL reveal too. */
+const CADENCE = {
+  // ---- per-step base + jitter (the "keystroke" rhythm) ----------------------
+  BASE_MS: 34,            // comfortable base delay per reveal step (word/token)
+  JITTER: 0.45,           // ±fraction of the step delay applied randomly per step
+  STEP_FLOOR_MS: 9,       // never tick faster than this (even when catching up)
+  STEP_CEIL_MS: 120,      // never tick slower than this per ordinary step
+  // ---- micro-pauses (humans hesitate at structure) --------------------------
+  PAUSE_NEWLINE_MS: 130,  // extra dwell after finishing a line (carriage feel)
+  PAUSE_SENTENCE_MS: 180, // extra after . ? ! (end-of-statement-ish)
+  PAUSE_CLAUSE_MS: 70,    // extra after , ; :
+  PAUSE_BRACKET_MS: 55,   // extra after { } ( ) [ ] (block punctuation)
+  // ---- ease across the whole block (in then out) ----------------------------
+  EASE_IN: 1.18,          // start slightly slower (settling into the block)
+  EASE_OUT: 0.78,         // end slightly quicker (winding down to "done")
+  // ---- gap-adaptive target duration -----------------------------------------
+  GAP_FRACTION: 0.58,     // spend ~58% of the recent inter-edit gap typing
+  GAP_SAMPLES: 5,         // look at up to this many recent edit/write timestamps
+  MIN_MS: 600,            // floor for a reveal's target duration
+  MAX_MS: 6000,           // ceiling for a reveal's target duration (big blocks)
+  DEFAULT_MS: 1400,       // target when we can't measure a gap yet (first edits)
+  // ---- granularity + terminal caps ------------------------------------------
+  LINE_CHARS: 800,        // hunk over this many chars reveals per-LINE (still progressive)
+  TERM_MAX_MS: 3500,      // hard cap on a single terminal block's reveal animation
+  CARET_MS: 1100,         // blink period for the idle caret (CSS reads this too)
+};
 
 /* ---- resizer layout (#2): the .ide grid gains explicit gutter tracks so the
  * user can drag tree↔editor (vertical, col-resize) and editor↔terminal
@@ -259,6 +296,42 @@ const ANSI_RE = /\x1b[\[\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry
 function stripAnsi(s) { return s ? String(s).replace(ANSI_RE, '') : ''; }
 function isNearBottom(node, slack = 50) {
   return node.scrollHeight - node.scrollTop - node.clientHeight < slack;
+}
+
+/* Median gap (ms) between consecutive ascending timestamps. `tsList` is epoch
+ * SECONDS (the wire's Activity.ts unit) oldest->newest; we diff neighbours and
+ * take the median (robust to one anomalous long think). Returns 0 when there
+ * aren't at least two timestamps to span a gap. Pure — unit-testable. */
+function medianGapMs(tsList) {
+  if (!Array.isArray(tsList) || tsList.length < 2) return 0;
+  const gaps = [];
+  for (let i = 1; i < tsList.length; i++) {
+    const d = (tsList[i] - tsList[i - 1]) * 1000;   // seconds -> ms
+    if (isFinite(d) && d > 0) gaps.push(d);
+  }
+  if (!gaps.length) return 0;
+  gaps.sort((a, b) => a - b);
+  const mid = gaps.length >> 1;
+  return gaps.length % 2 ? gaps[mid] : (gaps[mid - 1] + gaps[mid]) / 2;
+}
+
+/* The extra micro-pause (ms) a human would take AFTER typing `chunk` — a longer
+ * dwell at end-of-statement punctuation, a medium one at clause punctuation, a
+ * short one after block brackets. `atLineEnd` adds the carriage-return dwell.
+ * Looks only at the last non-space char of the chunk (whitespace travels with the
+ * preceding word in our word-split). Pure. */
+function microPauseAfter(chunk, atLineEnd, C) {
+  let extra = atLineEnd ? C.PAUSE_NEWLINE_MS : 0;
+  if (chunk) {
+    // last meaningful (non-space) char of the chunk
+    let j = chunk.length - 1;
+    while (j >= 0 && (chunk[j] === ' ' || chunk[j] === '\t')) j--;
+    const ch = j >= 0 ? chunk[j] : '';
+    if (ch === '.' || ch === '!' || ch === '?') extra += C.PAUSE_SENTENCE_MS;
+    else if (ch === ',' || ch === ';' || ch === ':') extra += C.PAUSE_CLAUSE_MS;
+    else if (ch === '{' || ch === '}' || ch === '(' || ch === ')' || ch === '[' || ch === ']') extra += C.PAUSE_BRACKET_MS;
+  }
+  return extra;
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => (
@@ -647,6 +720,17 @@ export function mountIdePane(mountEl, store, opts = {}) {
   let fallbackHlGen = 0;
   // FEATURE B: handle for the in-flight hunk-reveal timer (so we can cancel it).
   let fallbackRevealTimer = 0;
+  // FEATURE B (caret): a single reusable blinking-caret span. While a reveal is
+  // running it sits inline at the active typing position; when the reveal finishes
+  // it stays (blinking) at the last-typed spot so an idle gap looks like a paused
+  // typist, not a frozen UI. Hidden when follow is paused / the user scrolls away.
+  // Created lazily on first use; re-parented as the active line changes.
+  /** @type {HTMLElement|null} */
+  let revealCaret = null;
+  let caretLine = -1;        // 0-based fallback line the caret currently sits on
+  // Adaptive target duration (ms) computed at the START of each reveal from the
+  // recent inter-edit gap; the per-step pacing eases around base = target/steps.
+  let revealTargetMs = CADENCE.DEFAULT_MS;
   // FIX 1 — stable surrounding render: what the fallback currently has MOUNTED, so a
   // follow-edit on the SAME file can update ONLY the changed line range in place
   // (no whole-file rebuild that flashes the entire screen). `fallbackPath` is the
@@ -690,10 +774,21 @@ export function mountIdePane(mountEl, store, opts = {}) {
   /** @type {Map<string, number>} */
   const touchedAt = new Map();        // path -> last edit/write ts (for the dot)
 
-  // terminal: reconcile blocks by ref_seq
-  /** @type {Map<number, {block:HTMLElement, cmdEl:HTMLElement, outEl:HTMLElement, exitEl:HTMLElement, chunks:number, command:(string|null), done:boolean}>} */
+  // terminal: reconcile blocks by ref_seq. Each block reveals NATURALLY (FEATURE B
+  // #4): the COMMAND types out, then OUTPUT streams in — driven by one shared timer
+  // chain (termRevealTimer), not a dump. Per-block reveal state:
+  //   targetCmd  : full command string to type (or null until known)
+  //   cmdShown   : chars of the command revealed so far
+  //   srcChunks  : count of store chunks already pulled into pendingOut
+  //   pendingOut : output text received but not yet streamed onto the screen
+  //   exitReady  : the exit pill update, deferred until output finishes streaming
+  /** @type {Map<number, {block:HTMLElement, cmdEl:HTMLElement, outEl:HTMLElement, exitEl:HTMLElement, srcChunks:number, targetCmd:(string|null), cmdShown:number, pendingOut:string, exitReady:(null|{code:(number|null)}), done:boolean}>} */
   const termBlocks = new Map();
   let termSession = null;             // which session's terminal we're showing
+  // one shared timer + bookkeeping for the natural terminal reveal.
+  let termRevealTimer = 0;
+  let termCatchUp = 1;                // >1 => compress remaining terminal delays (smooth speed-up)
+  let termStartedAt = 0;             // wall-clock when the current drain began (TERM_MAX_MS cap)
 
   // auto-switch bookkeeping: the highest edit/write seq we've already reacted to
   let lastEditSeq = 0;
@@ -972,12 +1067,80 @@ export function mountIdePane(mountEl, store, opts = {}) {
     });
   }
 
+  // ---- gap-adaptive duration (FEATURE B #2) ------------------------------
+  // Estimate the recent inter-edit rhythm for the FOLLOWED lead session and turn
+  // it into a comfortable target reveal duration. The real cadence is the gap
+  // BETWEEN edit/write blocks (the model thinking between tool calls); we spend a
+  // fraction of the recent MEDIAN gap typing, clamped to [MIN_MS, MAX_MS]. When we
+  // can't yet measure a gap (first edit) we use DEFAULT_MS. This keeps the typing
+  // proportional to reality: sparse edits read leisurely, dense edits read quick.
+  function adaptiveRevealMs() {
+    const lead = leadSessionId();
+    let tsList = [];
+    if (lead) {
+      const ring = store.activitiesForSession(lead) || [];
+      // newest GAP_SAMPLES edit/write timestamps, in ascending order
+      for (let i = ring.length - 1; i >= 0 && tsList.length < CADENCE.GAP_SAMPLES; i--) {
+        const a = ring[i];
+        if ((a.kind === 'edit' || a.kind === 'write') && typeof a.ts === 'number') tsList.push(a.ts);
+      }
+      tsList.reverse();
+    }
+    const gap = medianGapMs(tsList);
+    if (!gap) return CADENCE.DEFAULT_MS;
+    return clamp(Math.round(gap * CADENCE.GAP_FRACTION), CADENCE.MIN_MS, CADENCE.MAX_MS);
+  }
+
+  // ---- blinking caret (FEATURE B #3) -------------------------------------
+  // One reusable caret span, parked inline after the active line's code while
+  // typing and left blinking at the last position when idle. We re-parent it (not
+  // recreate) so there's only ever one. Hidden when there's no followed position
+  // or follow is paused / the user scrolled away.
+  function ensureCaret() {
+    if (!revealCaret) {
+      revealCaret = el('span', 'wyc-caret');
+      revealCaret.setAttribute('aria-hidden', 'true');
+    }
+    return revealCaret;
+  }
+  // Place the caret at the end of fallback line `li` (0-based). It rides INSIDE the
+  // .efline (after .ef-code) so it flows with the text and inherits line geometry.
+  function placeCaretAtLine(li) {
+    if (followPaused) { hideCaret(); return; }
+    if (!fallbackEl || li < 0 || li >= fallbackEl.children.length) { hideCaret(); return; }
+    const lineEl = fallbackEl.children[li];
+    const codeEl = fallbackCodeEls[li];
+    if (!lineEl || !codeEl) { hideCaret(); return; }
+    const c = ensureCaret();
+    // insert right after the code span (before the trailing "\n" text node)
+    if (codeEl.nextSibling !== c) lineEl.insertBefore(c, codeEl.nextSibling);
+    c.classList.remove('idle');         // solid while actively typing
+    c.style.display = '';
+    caretLine = li;
+  }
+  // Switch the caret to its idle (gentle blink) state at the current position —
+  // the "paused typist between blocks" look. No-op if follow is paused.
+  function idleCaret() {
+    if (followPaused || !revealCaret || !revealCaret.parentNode) { hideCaret(); return; }
+    revealCaret.classList.add('idle');
+    revealCaret.style.display = '';
+  }
+  function hideCaret() {
+    if (revealCaret) { revealCaret.style.display = 'none'; revealCaret.classList.remove('idle'); }
+  }
+  function removeCaret() {
+    if (revealCaret && revealCaret.parentNode) revealCaret.parentNode.removeChild(revealCaret);
+    caretLine = -1;
+  }
+
   // Cancel any in-flight typewriter reveal (FEATURE B). Bumping fallbackHlGen in
   // renderFallback already makes the running reveal's gen check abort on its next
   // tick; this also clears the pending timer immediately so nothing fires after a
-  // teardown / file switch.
+  // teardown / file switch. The caret is detached so it never strands mid-document
+  // (a continuing reveal re-places it; an idle settle parks it deliberately).
   function cancelFallbackReveal() {
     if (fallbackRevealTimer) { try { clearTimeout(fallbackRevealTimer); } catch (_) {} fallbackRevealTimer = 0; }
+    removeCaret();
   }
 
   // FEATURE B — STREAMING REVEAL of a freshly-landed hunk (FIX 1: natural rhythm,
@@ -990,40 +1153,45 @@ export function mountIdePane(mountEl, store, opts = {}) {
   // received, never invents content, operates on the (read-only) fallback view, and
   // settles to the exact full hljs-highlighted content.
   //
-  // FIX 1 pacing — NO "type a prefix then SNAP the rest." Instead:
-  //  - small/medium hunks reveal per WORD;
-  //  - hunks over TYPEWRITER_MAX_CHARS reveal per LINE (still progressive);
-  //  - the per-step delay EASES DOWN as we progress (and is shorter the bigger the
-  //    hunk), so a big hunk simply accelerates and SETTLES gently — the transition
-  //    to "done" is imperceptible, never a single full-screen flash.
-  // A newer render bumps fallbackHlGen and the gen check here aborts (the newer
-  // reveal continues to the latest target — cancel-and-continue, not a hard reset).
+  // ORGANIC pacing — NO "type a prefix then SNAP the rest", and NOT a metronome:
+  //  - small/medium hunks reveal per WORD; hunks over CADENCE.LINE_CHARS reveal
+  //    per LINE (still progressive, never a dump);
+  //  - the TARGET duration adapts to the recent inter-edit gap (adaptiveRevealMs);
+  //  - per-step delay = base × ease(in→out) × (1 ± jitter), plus a MICRO-PAUSE at
+  //    line breaks / after punctuation — so it reads like a human typing;
+  //  - a blinking CARET rides the active position and is left blinking when done.
+  // CANCEL-AND-CONTINUE: a newer render bumps fallbackHlGen; the gen check here
+  // aborts the old reveal and the newer one takes over. If a new edit arrives while
+  // this block is still typing, the caller accelerates US to the finish first
+  // (accelerateRevealToFinish) — a smooth speed-up, not a snap/dump.
   function revealHunkInFallback(path, lines, codeEls, range, follow, gen) {
     const { startIdx, endIdx } = range;
     // total chars in the changed region decides word- vs line-granularity.
     let totalChars = 0;
     for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) totalChars += (lines[li] || '').length;
-    const byLine = totalChars > TYPEWRITER_MAX_CHARS;   // big hunk -> reveal line-by-line
+    const byLine = totalChars > CADENCE.LINE_CHARS;   // big hunk -> reveal line-by-line
 
-    // Build the ordered reveal plan: {li, chunk} steps. Per word for normal hunks
-    // (split on whitespace boundaries, whitespace kept attached so words "appear");
-    // per whole line for big hunks (one chunk == the full line) so we accelerate
-    // through volume without ever dumping everything at once.
-    /** @type {{li:number, chunk:string}[]} */
+    // Build the ordered reveal plan: {li, chunk, lineEnd} steps. Per word for normal
+    // hunks (split on whitespace boundaries, whitespace kept attached so words
+    // "appear"); per whole line for big hunks (one chunk == the full line) so we
+    // move through volume without ever dumping everything at once.
+    /** @type {{li:number, chunk:string, lineEnd:boolean}[]} */
     const plan = [];
     for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) {
       const text = lines[li] || '';
       codeEls[li].textContent = '';                 // start the changed line empty
       if (byLine) {
-        plan.push({ li, chunk: text });             // whole line in one step
+        plan.push({ li, chunk: text, lineEnd: true });             // whole line in one step
       } else {
         const pieces = text.match(/\S+\s*|\s+/g) || (text ? [text] : []);
-        for (const p of pieces) plan.push({ li, chunk: p });
+        if (!pieces.length) { plan.push({ li, chunk: '', lineEnd: true }); }   // blank line: one empty step (carriage feel)
+        else for (let k = 0; k < pieces.length; k++) plan.push({ li, chunk: pieces[k], lineEnd: k === pieces.length - 1 });
       }
     }
     if (!plan.length) {                              // all-blank region: nothing to type
       for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) codeEls[li].textContent = lines[li] || '';
       fallbackRevealTimer = 0;
+      removeCaret();
       return;
     }
 
@@ -1031,18 +1199,30 @@ export function mountIdePane(mountEl, store, opts = {}) {
     const built = new Map();    // li -> string revealed so far
     const ensure = (li) => { if (!built.has(li)) built.set(li, ''); return built.get(li); };
 
-    // Pace: ease the per-step delay DOWN over the course of the reveal (a gentle
-    // accelerate-and-settle), and start faster for bigger plans so the whole reveal
-    // lands near TYPEWRITER_BUDGET_MS without a hard cut. base = budget/steps gives
-    // the average cadence; we modulate it from ~1.35x (start, unhurried) down to
-    // ~0.45x (end, settling) by progress so the finish is smooth, not abrupt.
-    const STEP_FLOOR_MS = 6, STEP_CEIL_MS = 26;
+    // Pace from the ADAPTIVE target: base = target/steps is the average cadence,
+    // clamped to a sane per-step band. We modulate it with a gentle ease that
+    // starts a touch slower (EASE_IN, settling into the block) and ends a touch
+    // quicker (EASE_OUT, winding down to "done"), and add ±JITTER so no two steps
+    // are identical (humans aren't constant). Micro-pauses (line break / punctuation)
+    // are added on top in tick(). `catchUp` (>1) compresses everything smoothly when
+    // a newer edit is waiting — a speed-up, never a snap.
     const steps = plan.length;
-    const base = clamp(TYPEWRITER_BUDGET_MS / steps, STEP_FLOOR_MS, STEP_CEIL_MS);
-    const delayFor = (idx) => {
+    revealTargetMs = adaptiveRevealMs();
+    const base = clamp(revealTargetMs / steps, CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS);
+    let catchUp = 1;            // >1 => compress remaining delays (smooth speed-up)
+    const easeAt = (idx) => {
       const t = steps > 1 ? idx / (steps - 1) : 1;   // 0..1 progress
-      const ease = 1.35 - 0.90 * t;                  // 1.35x -> 0.45x (accelerate)
-      return clamp(Math.round(base * ease), STEP_FLOOR_MS, STEP_CEIL_MS);
+      // ease in then out: a smooth hump that begins at EASE_IN, dips toward 1 in
+      // the middle, and finishes at EASE_OUT — quicker at the tail, never abrupt.
+      return CADENCE.EASE_IN + (CADENCE.EASE_OUT - CADENCE.EASE_IN) * t;
+    };
+    const jitter = () => 1 + (Math.random() * 2 - 1) * CADENCE.JITTER;
+    const delayFor = (idx, step) => {
+      let d = base * easeAt(idx) * jitter() / catchUp;
+      // micro-pause AFTER this step (punctuation / line break) — also scaled by
+      // catchUp so accelerate-to-finish stays smooth through pauses too.
+      if (step) d += microPauseAfter(step.chunk, step.lineEnd, CADENCE) / catchUp;
+      return clamp(Math.round(d), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS + CADENCE.PAUSE_SENTENCE_MS);
     };
 
     let i = 0;
@@ -1062,31 +1242,53 @@ export function mountIdePane(mountEl, store, opts = {}) {
 
     const tick = () => {
       // aborted by a newer render / teardown / file-switch? (cancel-and-continue:
-      // the newer reveal owns the region now; we just stop.)
+      // the newer reveal owns the region now; we just stop. caret is removed by
+      // cancelFallbackReveal in that path.)
       if (destroyed || gen !== fallbackHlGen || !fallbackEl) { fallbackRevealTimer = 0; return; }
       if (i >= plan.length) {                        // done — gently, no dump
         if (follow && !followPaused) { lastFollowLine = Math.min(endIdx + 1, lines.length); scrollFallbackToLine(lastFollowLine, false); }
+        // park the caret blinking at the last typed line (the "paused typist" look)
+        placeCaretAtLine(endIdx);
+        idleCaret();
         fallbackRevealTimer = 0;
         return;
       }
-      const { li, chunk } = plan[i];
+      const step = plan[i];
+      const { li, chunk } = step;
       const next = ensure(li) + chunk;
       built.set(li, next);
       if (codeEls[li]) codeEls[li].textContent = next;   // plain text while typing (escaped via textContent)
-      // when this step completes a line (next plan entry is a new line, or end),
-      // settle + highlight the finished line so revealed code colorizes as it lands.
-      const isLineEnd = (i + 1 >= plan.length) || plan[i + 1].li !== li;
-      if (isLineEnd) settleLine(li);
+      // caret rides the active line (solid while typing)
+      placeCaretAtLine(li);
+      // when this step completes a line, settle + highlight it so revealed code
+      // colorizes as it lands (re-place the caret after, since innerHTML rewrite
+      // drops the inserted caret node).
+      if (step.lineEnd) { settleLine(li); placeCaretAtLine(li); }
       // follow the revealing line (1-based), honoring the pause state
       if (follow && !followPaused) {
         lastFollowLine = li + 1;
         scrollFallbackToLine(li + 1, false);
       }
       i++;
-      fallbackRevealTimer = setTimeout(tick, delayFor(i));
+      fallbackRevealTimer = setTimeout(tick, delayFor(i, plan[i]));
     };
+
+    // Accelerate THIS reveal to its finish smoothly (used when a new edit arrives
+    // mid-reveal so we never lag reality). We RAMP the compression instead of
+    // snapping: each call increases catchUp, so the remaining steps tighten toward
+    // the floor over a few frames rather than dumping in one. Exposed via closure.
+    revealHunkInFallback._accelerate = () => { catchUp = Math.min(catchUp * 3.5, 40); };
+
     cancelFallbackReveal();
-    fallbackRevealTimer = setTimeout(tick, delayFor(0));
+    fallbackRevealTimer = setTimeout(tick, delayFor(0, plan[0]));
+  }
+  // Smoothly speed the in-flight reveal (if any) toward completion — a ramp, not a
+  // snap. Called when a newer edit lands while a reveal is mid-flight so the catch-
+  // up reads as a quick finish, then the new block starts. Safe if nothing running.
+  function accelerateRevealToFinish() {
+    if (fallbackRevealTimer && typeof revealHunkInFallback._accelerate === 'function') {
+      try { revealHunkInFallback._accelerate(); } catch (_) {}
+    }
   }
 
   // Scroll the fallback container so `line` (1-based) is vertically centered.
@@ -1252,11 +1454,17 @@ export function mountIdePane(mountEl, store, opts = {}) {
     if (followPaused) return;
     followPaused = true;
     showFollowChip();
+    hideCaret();                 // a paused/scrolled-away view shouldn't show the caret
   }
   // Resume following. If `jump` and we know the last edit line, scroll back to it.
   function resumeFollow(jump) {
     followPaused = false;
     hideFollowChip();
+    // bring the blinking caret back to its last position if the reveal has settled
+    // and we're on the fallback view (CM has its own native cursor handling).
+    if (!fallbackRevealTimer && fallbackEl && fallbackEl.parentNode && caretLine >= 0) {
+      placeCaretAtLine(caretLine); idleCaret();
+    }
     if (jump && lastFollowLine > 0) {
       if (cm && cm.view && cm.view.dom.parentNode === editorWrap) {
         try {
@@ -1658,12 +1866,20 @@ export function mountIdePane(mountEl, store, opts = {}) {
     for (const [p, row] of fileRowEls) row.classList.toggle('current', p === path);
   }
 
-  /* ==================================================================== terminal */
+  /* ==================================================================== terminal
+   * NATURAL REVEAL (FEATURE B #4). The store hands us complete command strings +
+   * (possibly chunked) output. We don't dump them: this reconcile QUEUES new
+   * content onto each block, and a single shared timer chain (termTick) types the
+   * command out then streams the output line/chunk-by-chunk at the same gentle,
+   * gap-adaptive cadence — scroll-following the output, capped at TERM_MAX_MS per
+   * block, with cancel-and-continue when a newer command lands. The exit pill +
+   * styling are preserved (the pill update is deferred until output finishes). */
   function renderTerminal() {
     const lead = leadSessionId();
     if (lead !== termSession) {
-      // lead changed (handoff or re-target): reset the terminal feed
+      // lead changed (handoff or re-target): reset the terminal feed + reveal
       termSession = lead;
+      cancelTermReveal();
       termBlocks.clear();
       termFeed.innerHTML = '';
       if (!termEmpty.parentNode) termBody.insertBefore(termEmpty, termFeed);
@@ -1672,7 +1888,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     const bufs = store.terminalForSession(lead) || [];
     if (bufs.length && termEmpty.parentNode) termEmpty.remove();
 
-    const stick = isNearBottom(termBody);
+    let queuedSomething = false;
     for (const buf of bufs) {
       let b = termBlocks.get(buf.ref_seq);
       if (!b) {
@@ -1686,26 +1902,141 @@ export function mountIdePane(mountEl, store, opts = {}) {
         const outEl = el('pre', 'term-out');
         block.append(cmd, outEl);
         termFeed.append(block);
-        b = { block, cmdEl, outEl, exitEl, chunks: 0, command: null, done: false };
+        b = { block, cmdEl, outEl, exitEl, srcChunks: 0, targetCmd: null, cmdShown: 0, pendingOut: '', exitReady: null, done: false };
         termBlocks.set(buf.ref_seq, b);
+        // a brand-new command block: smoothly finish any block still revealing
+        // (cancel-and-continue) so we never lag the live shell.
+        accelerateTermRevealToFinish();
       }
+      // queue the command text (typed out by the ticker, not shown instantly)
       const cmdText = buf.command != null ? buf.command : '(command pending)';
-      if (b.command !== cmdText) { b.cmdEl.textContent = cmdText; b.command = cmdText; }
-      if (buf.chunks.length > b.chunks) {
-        let added = '';
-        for (let i = b.chunks; i < buf.chunks.length; i++) added += buf.chunks[i];
-        b.outEl.append(document.createTextNode(stripAnsi(added)));
-        b.chunks = buf.chunks.length;
+      if (b.targetCmd !== cmdText) {
+        // if the command string changed before we finished typing the old one, keep
+        // what's shown only if it's still a prefix; otherwise restart cleanly.
+        if (b.targetCmd != null && cmdText.indexOf(b.cmdEl.textContent) !== 0) { b.cmdShown = 0; b.cmdEl.textContent = ''; }
+        b.targetCmd = cmdText;
+        queuedSomething = true;
       }
-      if (buf.done && !b.done) {
-        b.done = true;
-        const code = buf.exit_code;
-        if (code === 0 || code == null) { b.exitEl.className = 'exit ok'; b.exitEl.textContent = code === 0 ? 'exit 0' : 'done'; }
-        else { b.exitEl.className = 'exit bad'; b.exitEl.textContent = 'exit ' + code; }
+      // queue newly-arrived output chunks (streamed out by the ticker)
+      if (buf.chunks.length > b.srcChunks) {
+        let added = '';
+        for (let i = b.srcChunks; i < buf.chunks.length; i++) added += buf.chunks[i];
+        b.pendingOut += stripAnsi(added);
+        b.srcChunks = buf.chunks.length;
+        queuedSomething = true;
+      }
+      // defer the exit pill until this block's output has finished streaming, so the
+      // "exit N" pill doesn't pop before its output is on screen.
+      if (buf.done && b.exitReady == null && !b.done) {
+        b.exitReady = { code: buf.exit_code };
+        queuedSomething = true;
       }
     }
     termHdr.lastChild.textContent = `${termBlocks.size} cmd${termBlocks.size === 1 ? '' : 's'}`;
-    if (stick) termBody.scrollTop = termBody.scrollHeight;
+    // kick the shared reveal chain if there's anything to drain and it's idle.
+    if (queuedSomething) ensureTermReveal();
+  }
+
+  // True if any block still has command chars to type, output to stream, or a
+  // deferred exit pill to apply — i.e. the reveal chain has work left.
+  function termHasPending() {
+    for (const b of termBlocks.values()) {
+      if (b.targetCmd != null && b.cmdShown < b.targetCmd.length) return true;
+      if (b.pendingOut.length) return true;
+      if (b.exitReady != null && !b.done) return true;
+    }
+    return false;
+  }
+
+  // Start the shared terminal reveal chain if it isn't already running.
+  function ensureTermReveal() {
+    if (termRevealTimer || destroyed) return;
+    termCatchUp = 1;
+    termStartedAt = Date.now();
+    termRevealTimer = setTimeout(termTick, 0);
+  }
+  function cancelTermReveal() {
+    if (termRevealTimer) { try { clearTimeout(termRevealTimer); } catch (_) {} termRevealTimer = 0; }
+    termCatchUp = 1; termStartedAt = 0;
+  }
+  // Smoothly speed the in-flight terminal reveal toward completion (ramp, not snap),
+  // used when a newer command lands so the catch-up reads as a quick finish.
+  function accelerateTermRevealToFinish() {
+    if (termRevealTimer) termCatchUp = Math.min(termCatchUp * 3.5, 60);
+  }
+
+  // One step of the shared terminal reveal. Drains blocks in ref_seq order (causal):
+  // for the oldest block with pending content we either type the next slice of its
+  // command or stream the next slice of its output; once a block is fully revealed
+  // we apply its deferred exit pill and move on. A wall-clock cap (TERM_MAX_MS,
+  // relaxed by catchUp) keeps a giant output from animating forever — past the cap
+  // we flush the remainder in larger slices so it settles quickly but still streams.
+  function termTick() {
+    if (destroyed) { termRevealTimer = 0; return; }
+    // find the oldest (smallest ref_seq) block with work left.
+    let key = null, b = null;
+    let minSeq = Infinity;
+    for (const [seq, blk] of termBlocks) {
+      const hasWork = (blk.targetCmd != null && blk.cmdShown < blk.targetCmd.length)
+        || blk.pendingOut.length || (blk.exitReady != null && !blk.done);
+      if (hasWork && seq < minSeq) { minSeq = seq; key = seq; b = blk; }
+    }
+    if (!b) { termRevealTimer = 0; termCatchUp = 1; termStartedAt = 0; return; }
+
+    const stick = isNearBottom(termBody);
+    // over the time cap? flush in big slices (settle fast, still progressive).
+    const overCap = termStartedAt && (Date.now() - termStartedAt) > CADENCE.TERM_MAX_MS;
+    const speed = overCap ? 24 : termCatchUp;
+
+    // base per-step delay for the terminal: derive a comfortable cadence adapted to
+    // the recent inter-edit gap (shorter when edits are dense), then compress by
+    // `speed`. Terminal types/streams a touch quicker than the editor (smaller base).
+    const targetMs = Math.max(CADENCE.MIN_MS, Math.round(adaptiveRevealMs() * 0.7));
+    let delay;
+
+    // 1) type the command out first (char-grouped: a few chars per step so longer
+    //    commands don't crawl), then 2) stream output.
+    if (b.targetCmd != null && b.cmdShown < b.targetCmd.length) {
+      const remaining = b.targetCmd.length - b.cmdShown;
+      // ~targetMs spread over the command length, grouped so it's never glacial.
+      const grp = overCap ? remaining : clamp(Math.ceil(remaining / 28), 1, 4) * Math.max(1, Math.round(speed));
+      b.cmdShown = Math.min(b.targetCmd.length, b.cmdShown + grp);
+      b.cmdEl.textContent = b.targetCmd.slice(0, b.cmdShown);
+      const perChar = clamp(targetMs / Math.max(28, b.targetCmd.length), CADENCE.STEP_FLOOR_MS, 60);
+      delay = clamp(Math.round(perChar * grp / Math.max(1, speed)), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS);
+    } else if (b.pendingOut.length) {
+      // stream output a LINE at a time (or a chunk if a single line is huge), so it
+      // reads like the program printing. Take through the next newline; if none yet,
+      // take a bounded slice. Over the cap, take it all.
+      let take;
+      if (overCap) {
+        take = b.pendingOut.length;
+      } else {
+        const nl = b.pendingOut.indexOf('\n');
+        if (nl >= 0) take = Math.min(nl + 1, 400 * Math.max(1, Math.round(speed)));
+        else take = Math.min(b.pendingOut.length, 200 * Math.max(1, Math.round(speed)));
+      }
+      const slice = b.pendingOut.slice(0, take);
+      b.pendingOut = b.pendingOut.slice(take);
+      b.outEl.append(document.createTextNode(slice));
+      // a line landed -> small carriage-feel dwell; a partial chunk -> quicker.
+      const base = slice.endsWith('\n') ? clamp(targetMs / 24, CADENCE.STEP_FLOOR_MS, 70) : CADENCE.STEP_FLOOR_MS * 2;
+      delay = clamp(Math.round(base * (1 + (Math.random() * 2 - 1) * CADENCE.JITTER) / Math.max(1, speed)), CADENCE.STEP_FLOOR_MS, CADENCE.STEP_CEIL_MS);
+    } else if (b.exitReady != null && !b.done) {
+      // output fully streamed: NOW apply the deferred exit pill (preserved styling).
+      b.done = true;
+      const code = b.exitReady.code;
+      if (code === 0 || code == null) { b.exitEl.className = 'exit ok'; b.exitEl.textContent = code === 0 ? 'exit 0' : 'done'; }
+      else { b.exitEl.className = 'exit bad'; b.exitEl.textContent = 'exit ' + code; }
+      delay = CADENCE.STEP_FLOOR_MS;
+    } else {
+      delay = CADENCE.STEP_FLOOR_MS;
+    }
+
+    if (stick) termBody.scrollTop = termBody.scrollHeight;   // scroll-follow the output
+    // continue if anything still pending; else stop the chain.
+    if (termHasPending()) { termRevealTimer = setTimeout(termTick, delay); }
+    else { termRevealTimer = 0; termCatchUp = 1; termStartedAt = 0; }
   }
 
   /* ==================================================================== status */
@@ -1838,6 +2169,11 @@ export function mountIdePane(mountEl, store, opts = {}) {
     // A genuinely-new live edit re-engages follow: snap back to the live edit
     // even if the user had scrolled away (clears the manual-override pause).
     followPaused = false; hideFollowChip();
+    // NEVER lag reality (FEATURE B #2): if the previous block is still typing when
+    // this new edit lands, smoothly speed it to the finish during the (async) fetch
+    // window. The forthcoming render's cancel-and-continue then starts the new block.
+    accelerateRevealToFinish();
+    accelerateTermRevealToFinish();
 
     const path = target.file_path;
     const line = (typeof target.line === 'number' && target.line > 0) ? target.line : 0; // hint only
@@ -1892,6 +2228,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     fileGen.clear();
     touchedAt.clear();
     collapsedDirs.clear();
+    cancelTermReveal();
     termBlocks.clear();
     termFeed.innerHTML = '';
     termSession = null;
@@ -1906,6 +2243,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     if (layoutRO) { try { layoutRO.disconnect(); } catch (_) {} layoutRO = null; }
     if (followRAF) { try { cancelAnimationFrame(followRAF); } catch (_) {} followRAF = 0; }
     cancelFallbackReveal();          // stop any in-flight typewriter reveal (FEATURE B)
+    cancelTermReveal();              // stop the terminal reveal chain (FEATURE B #4)
     if (rawOn) {
       const client = getClient();
       if (client && typeof client.unwatchScreen === 'function' && watchedScreenSession) {
