@@ -9,3 +9,9 @@ node_modules/
 .cookie_secret
 .wyc_token
 *.local
+# Python packaging artifacts (M1 — setuptools). build/codemirror/ is the TRACKED CM
+# vendoring recipe; only the setuptools output is ignored.
+/build/lib/
+/build/bdist.*
+*.egg-info/
+/dist/
