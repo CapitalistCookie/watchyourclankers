@@ -60,6 +60,34 @@
 .ide .ide-gutter::after { background: var(--border-c); opacity: .55; }
 .ide .ide-gutter:hover::after,
 .ide .ide-gutter.dragging::after { background: var(--accent); opacity: 1; }
+/* a gutter adjacent to a COLLAPSED region is inert: no hairline, no drag cursor,
+ * no pointer events (its track is still 6px so placement stays stable). */
+.ide .ide-gutter.inert { cursor: default; pointer-events: none; }
+.ide .ide-gutter.inert::after { opacity: 0; }
+
+/* ============================================================ collapsed regions (FEATURE A)
+ * JS toggles .tree-collapsed / .editor-collapsed / .terminal-collapsed on .ide and
+ * shrinks the matching grid track to a header strip. Here we hide each region's
+ * BODY so only the header (with its chevron) shows in the shrunken track.
+ *
+ * Tree collapses to a thin vertical RAIL (col == TREE_COLLAPSED_PX): hide the body
+ * + the header's label/count, tighten the header padding, and center the chevron so
+ * the rail reads as a clickable spine. */
+.ide.tree-collapsed .ide-tree .ide-body { display: none; }
+.ide.tree-collapsed .ide-tree .ide-hdr {
+  padding: 7px 0; justify-content: center; gap: 0;
+}
+.ide.tree-collapsed .ide-tree .ide-hdr .accent,
+.ide.tree-collapsed .ide-tree .ide-hdr .count { display: none; }
+.ide.tree-collapsed .ide-tree .ide-chevron { margin: 0; }
+
+/* Editor collapses to its tab+meta strip (row == EDITOR_COLLAPSED_PX): hide the
+ * editor surface (CM / fallback / empty), keep the tabbar + meta bar visible. */
+.ide.editor-collapsed .ide-editor .editor-wrap { display: none; }
+
+/* Terminal collapses to its header strip (row == TERM_COLLAPSED_PX): hide the feed
+ * body, keep the header + its chevron + the cmd-count. */
+.ide.terminal-collapsed .ide-terminal .ide-body { display: none; }
 
 /* shared little section header */
 .ide-hdr {
@@ -73,6 +101,24 @@
   border-bottom: 1px solid var(--border-c);
   user-select: none;
 }
+
+/* ============================================================ collapse chevrons (FEATURE A)
+ * A tiny ▾/▸ toggle in each region header (file tree, editor meta bar, terminal).
+ * Clicking collapses that region's grid track to just its header strip; the other
+ * regions absorb the freed space (the JS rebuilds grid-template-{columns,rows}).
+ * ~12px, clanker-muted, accent on hover; flex 0-0 so it never shifts the layout. */
+.ide-chevron {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; margin: -2px 1px -2px 0;
+  font-size: 12px; line-height: 1;
+  color: var(--text-muted);
+  background: transparent;
+  border: none; border-radius: 2px;
+  cursor: pointer;
+  transition: color .12s ease, background .12s ease;
+}
+.ide-chevron:hover { color: var(--accent); background: var(--bg-surface); }
 .ide-hdr .accent { color: var(--cream); letter-spacing: .12em; }
 .ide-hdr .count  { color: var(--text-muted); margin-left: auto; }
 .ide-hdr .icon   { color: var(--accent-olive); }

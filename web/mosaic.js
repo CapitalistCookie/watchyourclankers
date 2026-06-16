@@ -173,9 +173,20 @@ export function mountMosaic(rootEl, store) {
   const grid = el('div', 'mos-grid');
   const rail = el('div', 'mos-rail');
   const railHdr = el('div', 'mos-rail-hdr');
-  railHdr.append(el('span', 'accent', 'more'), el('span', 'r-count', ''));
+  // explicit collapse chevron on the rail header (parity with the gutter-drag
+  // collapse + the per-tile chevron). › collapses the rail to a thin rib.
+  const railChevron = el('button', 'mos-rail-chevron', '›');
+  railChevron.title = 'collapse rail';
+  railChevron.addEventListener('click', () => setRailCollapsed(true));
+  const railCount = el('span', 'r-count', '');
+  railHdr.append(el('span', 'accent', 'more'), railCount, railChevron);
   const railBody = el('div', 'mos-rail-body');
-  rail.append(railHdr, railBody);
+  // thin re-open rib, shown only while the rail is collapsed (the header — and its
+  // chevron — are hidden at rib width, so the rib carries the expand affordance).
+  const railRib = el('button', 'mos-rail-rib', '‹');
+  railRib.title = 'expand rail';
+  railRib.addEventListener('click', () => setRailCollapsed(false));
+  rail.append(railHdr, railBody, railRib);
   // vertical gutter between the tile grid and the overflow rail (resizes rail width)
   const railGutter = makeGutter('x');
   railGutter.classList.add('mos-rail-gutter');
@@ -216,6 +227,7 @@ export function mountMosaic(rootEl, store) {
    * @property {boolean} pinned
    * @property {boolean} frozen
    * @property {boolean} flagged
+   * @property {boolean} collapsed       // body hidden; only the chrome header strip shows
    * @property {('ide'|'raw')} viewMode
    * @property {boolean} watchingScreen   // currently subscribed to a screen feed
    * @property {string|null} watchSession // session id we asked to watch
@@ -237,7 +249,7 @@ export function mountMosaic(rootEl, store) {
   // orientation key. Restored on mount, re-applied whenever the grid re-gutters.
   /** @type {{vertLayout?:boolean, railW?:number, [k:string]:any}} */
   let sizes = loadSizes(LAYOUT_KEY) || {};
-  let railCollapsed = false;     // rail explicitly dragged shut
+  let railCollapsed = !!sizes.railCollapsed; // rail collapsed shut (gutter or chevron); persisted
   /** @type {HTMLElement[]} */
   let trackGutters = [];         // gutters currently overlaid on the grid
   let lastGutterKey = '';        // dims+orientation signature the gutters were built for
@@ -248,6 +260,21 @@ export function mountMosaic(rootEl, store) {
   function setVertChosen(on) {
     if (!!sizes.vertLayout === !!on) return;
     if (on) sizes.vertLayout = true; else delete sizes.vertLayout;
+    saveSizes(LAYOUT_KEY, sizes);
+  }
+
+  // ---- collapsed tile state (keyed by THREAD id so it survives reflows/reloads) ----
+  // Persisted in the same LAYOUT_KEY blob as `collapsedThreads:[ids]`. A tile reads
+  // its collapsed flag from this set whenever a thread is bound to it, so a collapsed
+  // thread that scrolls out of the visible set and later returns stays collapsed.
+  /** @type {Set<string>} */
+  const collapsedThreads = new Set(Array.isArray(sizes.collapsedThreads) ? sizes.collapsedThreads : []);
+  function isThreadCollapsed(tid) { return !!tid && collapsedThreads.has(tid); }
+  function setThreadCollapsed(tid, on) {
+    if (!tid) return;
+    if (on === collapsedThreads.has(tid)) return;
+    if (on) collapsedThreads.add(tid); else collapsedThreads.delete(tid);
+    sizes.collapsedThreads = Array.from(collapsedThreads);
     saveSizes(LAYOUT_KEY, sizes);
   }
 
@@ -305,8 +332,29 @@ export function mountMosaic(rootEl, store) {
     return a.map((x) => (x > min ? x : (min || 1)));
   }
 
+  // which grid rows have EVERY one of their (existing) tiles collapsed? Such a row
+  // shrinks to header height (min-content) so its space is handed to sibling rows.
+  // Tiles fill the grid row-major: tile i sits at row floor(i/cols). A row counts
+  // as fully-collapsed only if it has ≥1 tile AND all its tiles are collapsed.
+  function fullyCollapsedRows(cols, rows) {
+    const out = new Array(rows).fill(false);
+    for (let r = 0; r < rows; r++) {
+      let any = false, allCollapsed = true;
+      for (let c = 0; c < cols; c++) {
+        const i = r * cols + c;
+        if (i >= tiles.length) continue;
+        any = true;
+        if (!tiles[i].collapsed) { allCollapsed = false; break; }
+      }
+      out[r] = any && allCollapsed;
+    }
+    return out;
+  }
+
   // build the grid-template-{columns,rows} strings from persisted (or default) fr
-  // weights and apply them inline (overriding the data-layout CSS defaults).
+  // weights and apply them inline (overriding the data-layout CSS defaults). Rows
+  // whose tiles are all collapsed are pinned to min-content (header strip only); the
+  // remaining fr weights stretch to fill the freed height.
   function applyGridTemplate() {
     const d = effDims();
     const k = trackKey();
@@ -314,7 +362,10 @@ export function mountMosaic(rootEl, store) {
     const colW = normTracks(store_.cols, d.cols);
     const rowW = normTracks(store_.rows, d.rows);
     grid.style.gridTemplateColumns = colW.map((w) => w + 'fr').join(' ');
-    grid.style.gridTemplateRows = rowW.map((w) => w + 'fr').join(' ');
+    const collapsedRow = fullyCollapsedRows(d.cols, d.rows);
+    grid.style.gridTemplateRows = rowW
+      .map((w, r) => (collapsedRow[r] ? 'min-content' : w + 'fr'))
+      .join(' ');
   }
 
   // read the live pixel sizes of the grid's tracks (used as drag baselines).
@@ -457,8 +508,13 @@ export function mountMosaic(rootEl, store) {
       cur.cols = px.map((w) => (w / tot) * px.length);
     }
     if (which === 'rows' || which == null) {
+      const d = effDims();
+      const collapsedRow = fullyCollapsedRows(d.cols, d.rows);
       const px = trackPx('rows'); const tot = px.reduce((s, x) => s + x, 0) || 1;
-      cur.rows = px.map((w) => (w / tot) * px.length);
+      const prev = normTracks(cur.rows, px.length);
+      // keep a collapsed row's stored fr (its live px is just the header strip and
+      // would otherwise be saved as a near-zero weight, corrupting the expand layout).
+      cur.rows = px.map((w, r) => (collapsedRow[r] ? prev[r] : (w / tot) * px.length));
     }
     sizes[k] = cur;
     saveSizes(LAYOUT_KEY, sizes);
@@ -475,11 +531,26 @@ export function mountMosaic(rootEl, store) {
 
   // ---- rail width gutter ----
   function applyRailWidth() {
-    if (railCollapsed) { rail.style.width = '0px'; rail.classList.add('mos-rail-collapsed'); return; }
+    if (railCollapsed) {
+      // settled-collapsed: drop inline width so the CSS rib width (a thin re-open
+      // strip) wins; the header/body hide and only .mos-rail-rib shows.
+      rail.style.width = '';
+      rail.classList.add('mos-rail-collapsed');
+      rail.classList.remove('mos-rail-collapsing');
+      return;
+    }
     rail.classList.remove('mos-rail-collapsed');
     const w = sizes.railW;
     if (typeof w === 'number') rail.style.width = clamp(w, RAIL_MIN, RAIL_MAX) + 'px';
     else rail.style.width = '';
+  }
+  // explicit collapse/expand (rail header chevron + rib). Persists the choice.
+  function setRailCollapsed(on) {
+    if (railCollapsed === !!on) return;
+    railCollapsed = !!on;
+    if (railCollapsed) sizes.railCollapsed = true; else delete sizes.railCollapsed;
+    saveSizes(LAYOUT_KEY, sizes);
+    applyRailWidth();
   }
   (function wireRailGutter() {
     let startW = 0;
@@ -495,15 +566,15 @@ export function mountMosaic(rootEl, store) {
       },
       onEnd: () => {
         const w = rail.getBoundingClientRect().width;
-        if (w < RAIL_MIN * 0.6) { railCollapsed = true; sizes.railW = RAIL_MIN; rail.classList.add('mos-rail-collapsed'); }
-        else { railCollapsed = false; sizes.railW = clamp(w, RAIL_MIN, RAIL_MAX); }
+        if (w < RAIL_MIN * 0.6) { railCollapsed = true; sizes.railW = RAIL_MIN; sizes.railCollapsed = true; rail.classList.add('mos-rail-collapsed'); }
+        else { railCollapsed = false; delete sizes.railCollapsed; sizes.railW = clamp(w, RAIL_MIN, RAIL_MAX); }
         rail.classList.remove('mos-rail-collapsing');
         saveSizes(LAYOUT_KEY, sizes);
         applyRailWidth();
       },
     });
     railGutter.addEventListener('dblclick', () => {
-      railCollapsed = false; delete sizes.railW; saveSizes(LAYOUT_KEY, sizes); applyRailWidth();
+      railCollapsed = false; delete sizes.railCollapsed; delete sizes.railW; saveSizes(LAYOUT_KEY, sizes); applyRailWidth();
     });
   })();
 
@@ -545,7 +616,7 @@ export function mountMosaic(rootEl, store) {
     const cFreeze = ctrlBtn('freeze', '❄', 'freeze (snapshot — stub)');
     const cFlag = ctrlBtn('flag', '⚑', 'flag (stub)');
     const cPop = ctrlBtn('popout', '⧉', 'pop out to new window');
-    const cCollapse = ctrlBtn('collapse', '–', 'collapse to rail');
+    const cCollapse = ctrlBtn('collapse', '▾', 'collapse / expand this tile');
 
     ctrlsWrap.append(viewtoggle, cPin.b, cFreeze.b, cFlag.b, cPop.b, cMax.b, cCollapse.b);
     chrome.append(dotEl, titleEl, subEl, spacer, ctrlsWrap);
@@ -563,7 +634,7 @@ export function mountMosaic(rootEl, store) {
       elTile, chrome, titleEl, subEl, dotEl, fanoutEl, bodyEl, paneEl,
       pane: null, usingIde: false,
       threadId: null,
-      pinned: false, frozen: false, flagged: false,
+      pinned: false, frozen: false, flagged: false, collapsed: false,
       viewMode: menu ? menu.effDefaultView() : 'ide',
       watchingScreen: false, watchSession: null,
       ctrls: { vbIde, vbRaw, cMax, cPin, cFreeze, cFlag, cPop, cCollapse },
@@ -580,7 +651,7 @@ export function mountMosaic(rootEl, store) {
     cFreeze.b.addEventListener('click', () => { tile.frozen = !tile.frozen; annotate(tile, tile.frozen ? 'freeze' : 'unfreeze'); syncChrome(tile); });
     cFlag.b.addEventListener('click', () => { tile.flagged = !tile.flagged; annotate(tile, tile.flagged ? 'flag' : 'unflag'); syncChrome(tile); });
     cPop.b.addEventListener('click', () => popOutThread(tile.threadId));
-    cCollapse.b.addEventListener('click', () => collapseTile(tile));
+    cCollapse.b.addEventListener('click', () => toggleCollapse(tile));
 
     tiles.push(tile);
     return tile;
@@ -594,11 +665,20 @@ export function mountMosaic(rootEl, store) {
 
   // ---------------------------------------------------------------- bind a thread to a tile
   function bindTile(tile, threadId) {
-    if (tile.threadId === threadId) { syncChrome(tile); return; }
+    if (tile.threadId === threadId) {
+      // same thread re-bound: keep collapsed state in sync with the persisted set
+      // (e.g. it was collapsed elsewhere) without disturbing the surface.
+      tile.collapsed = isThreadCollapsed(threadId);
+      syncChrome(tile);
+      return;
+    }
     // stop any screen watch tied to the old thread
     stopWatch(tile);
     tile.threadId = threadId;
     tile.frozen = false; // re-binding clears a frozen snapshot intent
+    // restore collapsed state for the newly-bound thread (a collapsed thread that
+    // left the visible set and returns stays collapsed; empty tiles are expanded).
+    tile.collapsed = isThreadCollapsed(threadId);
 
     if (threadId == null) {
       teardownPane(tile);
@@ -877,6 +957,12 @@ export function mountMosaic(rootEl, store) {
     tile.elTile.classList.toggle('is-pinned', tile.pinned);
     tile.elTile.classList.toggle('is-frozen', tile.frozen);
     tile.elTile.classList.toggle('is-flagged', tile.flagged);
+    // collapsed: hide the body (CSS), flip the chevron glyph (▾ open / ▸ shut).
+    tile.elTile.classList.toggle('is-collapsed', tile.collapsed);
+    const col = tile.ctrls.cCollapse.b;
+    col.classList.toggle('on', tile.collapsed);
+    col.textContent = tile.collapsed ? '▸' : '▾';
+    col.title = tile.collapsed ? 'expand this tile' : 'collapse this tile';
   }
 
   // ---------------------------------------------------------------- fan-out strip
@@ -1198,7 +1284,7 @@ export function mountMosaic(rootEl, store) {
     const show = menu.settings.showRail && overflow.length > 0;
     rail.classList.toggle('hidden', !show);
     railToggle.setAttribute('aria-pressed', String(menu.settings.showRail));
-    railHdr.lastChild.textContent = overflow.length ? ' +' + overflow.length : '';
+    railCount.textContent = overflow.length ? ' +' + overflow.length : '';
     if (!show) { railBody.innerHTML = ''; return; }
     // simple rebuild (small list); reconcile would be overkill for the rail.
     railBody.innerHTML = '';
@@ -1441,16 +1527,19 @@ export function mountMosaic(rootEl, store) {
     else menu.toast('no focused thread');
   }
 
-  // ================================================================ collapse (to rail)
-  function collapseTile(tile) {
-    // collapsing == unbind the tile + temporarily pin it empty so reflow doesn't
-    // immediately refill; simplest honest behavior: clear + let reflow refill from
-    // overflow on the next change (operator can re-focus from the rail).
-    const tid = tile.threadId;
-    bindTile(tile, null);
-    if (tid) menu.toast('collapsed — pick it again from the rail');
-    // trigger a reflow so the freed slot fills with overflow
-    reflow(true);
+  // ================================================================ collapse (tile body)
+  // Collapse a tile to JUST its chrome header strip (body hidden) so the other tiles
+  // in its row/column reclaim the space. State is keyed by THREAD id and persisted, so
+  // a collapsed thread stays collapsed across reflows/reload and when it leaves and
+  // re-enters the visible set. A collapsed tile still updates its header live.
+  function toggleCollapse(tile) {
+    if (!tile) return;
+    tile.collapsed = !tile.collapsed;
+    setThreadCollapsed(tile.threadId, tile.collapsed); // persist (no-op for empty tiles)
+    syncChrome(tile);
+    // re-evaluate row templates (a fully-collapsed row shrinks to header height) and
+    // reposition the overlay track gutters against the new live track sizes.
+    syncGutters();
   }
 
   // ================================================================ bar sync
@@ -1535,9 +1624,10 @@ export function mountMosaic(rootEl, store) {
     popOutFocused,
     resetLayout: () => {
       maximizedTileIdx = -1;
-      tiles.forEach((t) => { t.pinned = false; t.frozen = false; t.flagged = false; });
-      // also clear persisted pane sizes (track splits + rail width + vert choice).
-      sizes = {}; railCollapsed = false; saveSizes(LAYOUT_KEY, sizes);
+      tiles.forEach((t) => { t.pinned = false; t.frozen = false; t.flagged = false; t.collapsed = false; });
+      // also clear persisted pane sizes (track splits + rail width + vert choice)
+      // and every collapsed-tile flag (in-memory set + persisted list).
+      sizes = {}; railCollapsed = false; collapsedThreads.clear(); saveSizes(LAYOUT_KEY, sizes);
       rail.style.width = ''; lastGutterKey = '';
       reflow(true);
     },

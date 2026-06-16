@@ -36,6 +36,32 @@ const LAYOUT_KEY = 'wyc.debug.layout.v1';
 const GUTTER_PX = 6;
 const MIN_FRAC = 0.12;            // no track may collapse below ~12%
 const DEFAULTS = { col: 0.44, row: 0.5 }; // col = sessions share of width; row = ticker share of right-stack height
+const COLLAPSED_PX = 26;          // a collapsed pane's track shrinks to just its header (~26px)
+
+// ---- collapse-chevron CSS (self-injected, clanker palette) ------------------
+// Edited only in debug.js per the parent/agent file matrix, so the collapse UI
+// ships its own styles the same way resize.js injects its gutter CSS — no risk of
+// the "stylesheet never linked" trap. Idempotent via the id guard.
+const DBG_STYLE_ID = 'wyc-debug-collapse-css';
+function injectCollapseCss() {
+  if (typeof document === 'undefined' || document.getElementById(DBG_STYLE_ID)) return;
+  const s = document.createElement('style');
+  s.id = DBG_STYLE_ID;
+  s.textContent = `
+.pane-hdr .pane-collapse{
+  cursor:pointer; user-select:none; line-height:1;
+  font-size:11px; width:16px; text-align:center; flex:0 0 auto;
+  margin-left:8px; color:var(--text-muted,#78716C);
+  transition:color .12s ease,transform .12s ease;
+}
+.pane-hdr .pane-collapse:hover{ color:var(--accent,#C2410C); }
+.pane-hdr .pane-collapse:focus-visible{ outline:1px solid var(--accent,#C2410C); outline-offset:1px; }
+/* a collapsed pane: hide the body, keep the header (and its live counts) visible */
+.dbg-pane.is-collapsed{ overflow:hidden; }
+.dbg-pane.is-collapsed > .pane-body{ display:none; }
+`;
+  document.head.appendChild(s);
+}
 
 // ---- helpers ---------------------------------------------------------------
 function el(tag, cls, text) {
@@ -75,27 +101,51 @@ function isNearBottom(node, slack = 40) {
 
 // ---- the view --------------------------------------------------------------
 export function mount(el_, store) {
+  injectCollapseCss();
   el_.innerHTML = '';
   const root = el('div', 'dbg');
 
-  // (a) sessions pane
+  // A collapse chevron for a pane header (▾ expanded / ▸ collapsed). Clanker-styled
+  // via the injected CSS below (--text-muted, hover --accent). The `which` key maps
+  // to the layout.collapsed state. Returned so we can sync its glyph on restore.
+  function makeChevron(which) {
+    const c = el('span', 'pane-collapse', '▾');
+    c.setAttribute('role', 'button');
+    c.setAttribute('tabindex', '0');
+    c.setAttribute('aria-label', 'collapse pane');
+    const fire = (e) => { e.preventDefault(); e.stopPropagation(); toggleCollapse(which); };
+    c.addEventListener('click', fire);
+    c.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') fire(e); });
+    return c;
+  }
+
+  // (a) sessions pane. NOTE: the chevron is appended AFTER .count (far-right, since
+  // .count carries margin-left:auto), so we hold an explicit ref to each .count
+  // span — the render code must target it directly, not pane-hdr.lastChild (which
+  // is now the chevron).
   const sPane = el('div', 'dbg-pane dbg-sessions');
   const sHdr = el('div', 'pane-hdr');
-  sHdr.append(el('span', 'accent', 'sessions'), el('span', 'count', ''));
+  const sCount = el('span', 'count', '');
+  const sChevron = makeChevron('sessions');
+  sHdr.append(el('span', 'accent', 'sessions'), sCount, sChevron);
   const sBody = el('div', 'pane-body');
   sPane.append(sHdr, sBody);
 
   // (b) ticker pane
   const tPane = el('div', 'dbg-pane dbg-ticker');
   const tHdr = el('div', 'pane-hdr');
-  tHdr.append(el('span', 'accent', 'activity'), el('span', 'count', ''));
+  const tCount = el('span', 'count', '');
+  const tChevron = makeChevron('ticker');
+  tHdr.append(el('span', 'accent', 'activity'), tCount, tChevron);
   const tBody = el('div', 'pane-body');
   tPane.append(tHdr, tBody);
 
   // (c) terminal pane
   const xPane = el('div', 'dbg-pane dbg-terminal');
   const xHdr = el('div', 'pane-hdr');
-  xHdr.append(el('span', 'accent', 'terminal'), el('span', 'count', ''));
+  const xCount = el('span', 'count', '');
+  const xChevron = makeChevron('terminal');
+  xHdr.append(el('span', 'accent', 'terminal'), xCount, xChevron);
   const xBody = el('div', 'pane-body term-pane-body');
   xPane.append(xHdr, xBody);
 
@@ -118,23 +168,73 @@ export function mount(el_, store) {
   root.append(sPane, colGutter, tPane, rowGutter, xPane);
   el_.append(root);
 
-  // current fractions (restored from storage, else defaults)
+  // current fractions + collapsed flags (restored from storage, else defaults)
   const stored = loadSizes(LAYOUT_KEY);
+  const sc = (stored && stored.collapsed) || {};
   const layout = {
     col: clampFrac(stored && typeof stored.col === 'number' ? stored.col : DEFAULTS.col),
     row: clampFrac(stored && typeof stored.row === 'number' ? stored.row : DEFAULTS.row),
+    collapsed: { sessions: !!sc.sessions, ticker: !!sc.ticker, terminal: !!sc.terminal },
   };
+  const chevrons = { sessions: sChevron, ticker: tChevron, terminal: xChevron };
+  const panes = { sessions: sPane, ticker: tPane, terminal: xPane };
 
   function clampFrac(f) { return clamp(f, MIN_FRAC, 1 - MIN_FRAC); }
 
-  // Write the grid templates from the current fractions. The gutter tracks are a
-  // fixed 6px; the two content tracks split the remaining space by fraction.
-  function applyLayout() {
-    root.style.gridTemplateColumns =
-      `minmax(0, ${layout.col}fr) ${GUTTER_PX}px minmax(0, ${1 - layout.col}fr)`;
-    root.style.gridTemplateRows =
-      `minmax(0, ${layout.row}fr) ${GUTTER_PX}px minmax(0, ${1 - layout.row}fr)`;
+  // Persist the full layout (fractions + collapsed flags) in one object.
+  function persist() {
+    saveSizes(LAYOUT_KEY, { col: layout.col, row: layout.row, collapsed: layout.collapsed });
   }
+
+  // Write the grid templates from the current fractions + collapsed flags. The
+  // gutter tracks are a fixed 6px; non-collapsed content tracks split the remaining
+  // space by fraction. A collapsed track becomes a fixed COLLAPSED_PX (just its
+  // header) so the sibling pane reclaims the space.
+  //   columns: col1 = sessions | colGutter | col3 = ticker/terminal stack
+  //   rows:    row1 = ticker  | rowGutter | row3 = terminal
+  // The right column (col3) is never collapsed on the column axis — ticker and
+  // terminal collapse along their own rows instead.
+  function trackPair(aCollapsed, bCollapsed, aFrac) {
+    // Returns CSS sizes for the two content tracks given their collapse flags.
+    if (aCollapsed && bCollapsed) return [`${COLLAPSED_PX}px`, `${COLLAPSED_PX}px`];
+    if (aCollapsed) return [`${COLLAPSED_PX}px`, 'minmax(0, 1fr)'];
+    if (bCollapsed) return ['minmax(0, 1fr)', `${COLLAPSED_PX}px`];
+    return [`minmax(0, ${aFrac}fr)`, `minmax(0, ${1 - aFrac}fr)`];
+  }
+  function applyLayout() {
+    // Sessions collapses on the column axis; the right stack column never does.
+    const [c1] = trackPair(layout.collapsed.sessions, false, layout.col);
+    const c3 = layout.collapsed.sessions ? 'minmax(0, 1fr)' : `minmax(0, ${1 - layout.col}fr)`;
+    root.style.gridTemplateColumns = `${c1} ${GUTTER_PX}px ${c3}`;
+    // Ticker (row1) and terminal (row3) each collapse on the row axis.
+    const [r1, r3] = trackPair(layout.collapsed.ticker, layout.collapsed.terminal, layout.row);
+    root.style.gridTemplateRows = `${r1} ${GUTTER_PX}px ${r3}`;
+  }
+
+  // Reflect collapsed state onto a pane: hide body via .is-collapsed, swap glyph,
+  // update aria. The header (and its live counts) stay visible & keep updating.
+  function applyCollapsedClass(which) {
+    const on = !!layout.collapsed[which];
+    panes[which].classList.toggle('is-collapsed', on);
+    const ch = chevrons[which];
+    ch.textContent = on ? '▸' : '▾';
+    ch.setAttribute('aria-label', on ? 'expand pane' : 'collapse pane');
+    ch.setAttribute('aria-expanded', String(!on));
+  }
+  function syncAllCollapsed() {
+    applyCollapsedClass('sessions');
+    applyCollapsedClass('ticker');
+    applyCollapsedClass('terminal');
+  }
+
+  function toggleCollapse(which) {
+    layout.collapsed[which] = !layout.collapsed[which];
+    applyCollapsedClass(which);
+    applyLayout();
+    persist();
+  }
+
+  syncAllCollapsed();
   applyLayout();
 
   // Drag math: convert the pixel delta into a fraction of the relevant container
@@ -143,22 +243,25 @@ export function mount(el_, store) {
   attachDrag(colGutter, {
     axis: 'x',
     onStart: () => { startCol = layout.col; colSpan = Math.max(1, root.clientWidth - GUTTER_PX); },
-    onDelta: (dx) => { layout.col = clampFrac(startCol + dx / colSpan); applyLayout(); },
-    onEnd: () => saveSizes(LAYOUT_KEY, { col: layout.col, row: layout.row }),
+    // Dragging a gutter implicitly re-expands the axis it controls (a collapsed
+    // track has no fraction to drag); the sibling reclaims space symmetrically.
+    onDelta: (dx) => { layout.collapsed.sessions = false; applyCollapsedClass('sessions'); layout.col = clampFrac(startCol + dx / colSpan); applyLayout(); },
+    onEnd: () => persist(),
   });
   attachDrag(rowGutter, {
     axis: 'y',
     onStart: () => { startRow = layout.row; rowSpan = Math.max(1, root.clientHeight - GUTTER_PX); },
-    onDelta: (dy) => { layout.row = clampFrac(startRow + dy / rowSpan); applyLayout(); },
-    onEnd: () => saveSizes(LAYOUT_KEY, { col: layout.col, row: layout.row }),
+    onDelta: (dy) => { layout.collapsed.ticker = false; layout.collapsed.terminal = false; applyCollapsedClass('ticker'); applyCollapsedClass('terminal'); layout.row = clampFrac(startRow + dy / rowSpan); applyLayout(); },
+    onEnd: () => persist(),
   });
 
-  // Double-click a gutter resets that axis to its default.
+  // Double-click a gutter resets that axis to its default (and un-collapses it).
   colGutter.addEventListener('dblclick', () => {
-    layout.col = DEFAULTS.col; applyLayout(); saveSizes(LAYOUT_KEY, { col: layout.col, row: layout.row });
+    layout.col = DEFAULTS.col; layout.collapsed.sessions = false; applyCollapsedClass('sessions'); applyLayout(); persist();
   });
   rowGutter.addEventListener('dblclick', () => {
-    layout.row = DEFAULTS.row; applyLayout(); saveSizes(LAYOUT_KEY, { col: layout.col, row: layout.row });
+    layout.row = DEFAULTS.row; layout.collapsed.ticker = false; layout.collapsed.terminal = false;
+    applyCollapsedClass('ticker'); applyCollapsedClass('terminal'); applyLayout(); persist();
   });
 
   // ----- ticker state: append-only -----
@@ -181,7 +284,7 @@ export function mount(el_, store) {
   function renderSessions(state) {
     const threads = store.threadsList();
     const sessions = store.sessionsList();
-    sHdr.lastChild.textContent = `${sessions.length} session${sessions.length === 1 ? '' : 's'} · ${threads.length} thread${threads.length === 1 ? '' : 's'}`;
+    sCount.textContent = `${sessions.length} session${sessions.length === 1 ? '' : 's'} · ${threads.length} thread${threads.length === 1 ? '' : 's'}`;
 
     // Build the desired grouped order: each thread, then its sessions (handoff
     // order); finally any orphan sessions whose thread we don't have.
@@ -291,7 +394,7 @@ export function mount(el_, store) {
     }
     if (stick) tBody.scrollTop = tBody.scrollHeight;
 
-    tHdr.lastChild.textContent = `seq ${state.lastSeq}` + (state.gaps ? ` · ${state.gaps} gaps` : '');
+    tCount.textContent = `seq ${state.lastSeq}` + (state.gaps ? ` · ${state.gaps} gaps` : '');
   }
 
   function tickerRow(a) {
@@ -381,7 +484,7 @@ export function mount(el_, store) {
       }
     }
 
-    xHdr.lastChild.textContent = `${termBlocks.size} command${termBlocks.size === 1 ? '' : 's'}`;
+    xCount.textContent = `${termBlocks.size} command${termBlocks.size === 1 ? '' : 's'}`;
     if (stick) xBody.scrollTop = xBody.scrollHeight;
   }
 

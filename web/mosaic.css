@@ -186,6 +186,19 @@
   padding: 2px 6px; background: var(--bg-void); z-index: 5;
 }
 
+/* ---- collapsed tile: only the chrome header strip shows ----
+ * The body is removed from flow so the tile shrinks to header height; it pins to
+ * the TOP of its grid cell (align-self:start) so a non-collapsed sibling sharing
+ * the row keeps the height while this one yields its share. When EVERY tile in a
+ * row is collapsed mosaic.js sets that grid row to min-content, handing the freed
+ * vertical space to the sibling rows. The header (status dot + title) keeps
+ * updating live. A maximized tile always shows its body (max overrides collapse). */
+.mos-tile.is-collapsed { align-self: start; min-height: 0; }
+.mos-tile.is-collapsed > .mos-tile-body { display: none; }
+.mos-tile.is-collapsed.is-editing { border-top-width: 1px; } /* no 2px cap on a header-only strip */
+.mos-grid.has-max > .mos-tile.is-max.is-collapsed { align-self: stretch; }
+.mos-grid.has-max > .mos-tile.is-max.is-collapsed > .mos-tile-body { display: flex; }
+
 /* actively-editing emphasis: a thread GENERATING CODE right now (latest edit/write
  * within the active window) gets a 2px accent cap so the eye goes to where code is
  * being written. A subtle ✎ pulses on the tile title. Subordinate to focus/pin
@@ -241,6 +254,10 @@
 .mos-ctrl.pin.on { color: var(--accent-amber); }
 .mos-ctrl.flag.on { color: var(--accent-amber); }
 .mos-ctrl.freeze.on { color: var(--accent-amber); }
+/* collapse chevron (▾ open / ▸ shut): muted, hover → accent (clanker idiom) */
+.mos-ctrl.collapse { color: var(--text-muted); font-size: 11px; }
+.mos-ctrl.collapse:hover { color: var(--accent); background: var(--bg-surface); }
+.mos-ctrl.collapse.on { color: var(--accent); }
 
 /* the IDE-vs-raw toggle: a 2-state pill */
 .mos-viewtoggle {
@@ -346,13 +363,19 @@
 }
 .mos-rail.hidden { display: none; }
 /* width is driven inline by the rail-resize gutter (clamped 140–420px in JS).
- * collapsing transitions the width to 0; collapsed pins it shut. */
-.mos-rail { transition: width .12s ease; }
-.mos-rail.mos-rail-collapsing,
-.mos-rail.mos-rail-collapsed {
-  width: 0 !important; min-width: 0; border-width: 0; overflow: hidden;
+ * collapsing transitions the width to 0; settled-collapsed leaves a thin re-open
+ * rib (.mos-rail-rib) so the chevron-driven collapse stays reversible by click. */
+.mos-rail { transition: width .12s ease; position: relative; }
+/* mid-drag: shrink all the way to nothing for a clean drag-to-collapse feel. */
+.mos-rail.mos-rail-collapsing {
+  width: 0 !important; min-width: 0; border-width: 0; overflow: hidden; transition: none;
 }
-.mos-rail.mos-rail-collapsing { transition: none; }
+/* settled-collapsed: a slim vertical rib carrying an expand chevron. */
+.mos-rail.mos-rail-collapsed {
+  width: 18px !important; min-width: 18px; overflow: hidden;
+}
+.mos-rail.mos-rail-collapsed > .mos-rail-hdr,
+.mos-rail.mos-rail-collapsed > .mos-rail-body { display: none; }
 .mos-rail-hdr {
   flex: 0 0 auto;
   display: flex; align-items: center; gap: 6px;
@@ -363,6 +386,25 @@
 }
 .mos-rail-hdr .accent { color: var(--cream); }
 .mos-rail-hdr .r-count { color: var(--accent); }
+/* rail header collapse chevron (› collapse) — muted, hover → accent */
+.mos-rail-hdr .mos-rail-chevron {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  margin-left: auto; padding: 0 2px; line-height: 1;
+  color: var(--text-muted); font-family: var(--mono); font-size: 13px;
+  transition: color .12s;
+}
+.mos-rail-hdr .mos-rail-chevron:hover { color: var(--accent); }
+/* the re-open rib: hidden until the rail is collapsed, then fills the slim strip */
+.mos-rail-rib { display: none; }
+.mos-rail.mos-rail-collapsed > .mos-rail-rib {
+  display: flex; align-items: flex-start; justify-content: center;
+  position: absolute; inset: 0;
+  appearance: none; border: 0; background: var(--bg-panel); cursor: pointer;
+  color: var(--text-muted); font-family: var(--mono); font-size: 13px;
+  padding-top: 9px; writing-mode: vertical-rl;
+  transition: color .12s, background .12s;
+}
+.mos-rail.mos-rail-collapsed > .mos-rail-rib:hover { color: var(--accent); background: var(--bg-surface); }
 .mos-rail-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .mos-rail-item {
   display: flex; align-items: center; gap: 9px;

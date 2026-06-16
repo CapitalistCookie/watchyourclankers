@@ -205,6 +205,16 @@ const TERM_H_DEFAULT = 200;   // bottom terminal default height (px)
 const TERM_H_MIN = 60;        // clamp floor
 const TERM_FRAC_MAX = 0.60;   // terminal may take at most 60% of grid height
 
+/* ---- collapsible regions (FEATURE A): each region (file tree / editor / bottom
+ * terminal) gets a header chevron that collapses its grid track to just its
+ * header strip; the OTHER regions absorb the freed space. The tree is a COLUMN
+ * (collapses to a narrow vertical rail) and the terminal is a ROW (collapses to
+ * its header bar); the editor is the flex middle (collapsing it grows the
+ * terminal). Persisted alongside {treeW, termH} in the same LAYOUT_KEY blob. */
+const TREE_COLLAPSED_PX = 26;     // collapsed tree column = a thin rail w/ the chevron
+const TERM_COLLAPSED_PX = 26;     // collapsed terminal row = just its header strip
+const EDITOR_COLLAPSED_PX = 56;   // collapsed editor row = tabbar (32) + meta strip
+
 /* ============================================================ tiny helpers */
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -350,6 +360,22 @@ export function mountIdePane(mountEl, store, opts = {}) {
     return (w.wyc && w.wyc.client) || null;
   }
 
+  // collapse chevron factory (FEATURE A). One small ▾/▸ button per region header;
+  // clicking toggles that region's collapsed state via toggleCollapse (defined in
+  // the layout section below — the handler closes over it, so it's resolved by the
+  // time a click fires). `region` keys into the `collapsed` map; `label` is for a11y.
+  const chevronEls = {};
+  function makeChevron(region, label) {
+    const b = el('button', 'ide-chevron', '▾');
+    b.type = 'button';
+    b.dataset.region = region;
+    b.setAttribute('aria-label', `collapse ${label}`);
+    b.title = `collapse / expand ${label}`;
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); toggleCollapse(region); });
+    chevronEls[region] = b;
+    return b;
+  }
+
   /* -------------------------------------------------- DOM skeleton (built once) */
   mountEl.innerHTML = '';
   const root = el('div', 'ide');
@@ -357,7 +383,9 @@ export function mountIdePane(mountEl, store, opts = {}) {
   // --- left: file tree
   const treePane = el('div', 'ide-pane ide-tree');
   const treeHdr = el('div', 'ide-hdr');
-  treeHdr.append(el('span', 'accent', 'files'), el('span', 'count', ''));
+  // collapse chevron (FEATURE A) — collapses the tree COLUMN to a thin rail.
+  const treeChevron = makeChevron('tree', 'files');
+  treeHdr.append(treeChevron, el('span', 'accent', 'files'), el('span', 'count', ''));
   const treeBody = el('div', 'ide-body');
   const treeList = el('div', 'tree-list');
   treeBody.append(treeList);
@@ -367,8 +395,11 @@ export function mountIdePane(mountEl, store, opts = {}) {
   const editorPane = el('div', 'ide-pane ide-editor');
   const tabbar = el('div', 'tabbar');
   const editorMeta = el('div', 'editor-meta');
+  // collapse chevron (FEATURE A) — collapses the editor ROW to its tab+meta
+  // strip (grows the terminal). Lives in the meta bar so the tabbar is untouched.
+  const editorChevron = makeChevron('editor', 'editor');
   const epath = el('span', 'epath');
-  editorMeta.append(epath);
+  editorMeta.append(editorChevron, epath);
   const editorWrap = el('div', 'editor-wrap');
   const editorEmpty = el('div', 'editor-empty', 'no file open — the editor follows what Claude edits');
   editorWrap.append(editorEmpty);
@@ -377,7 +408,9 @@ export function mountIdePane(mountEl, store, opts = {}) {
   // --- bottom: terminal
   const termPane = el('div', 'ide-pane ide-terminal');
   const termHdr = el('div', 'ide-hdr');
-  termHdr.append(el('span', 'icon', '$'), el('span', 'accent', 'terminal'), el('span', 'count', ''));
+  // collapse chevron (FEATURE A) — collapses the terminal ROW to its header strip.
+  const termChevron = makeChevron('terminal', 'terminal');
+  termHdr.append(termChevron, el('span', 'icon', '$'), el('span', 'accent', 'terminal'), el('span', 'count', ''));
   const termBody = el('div', 'ide-body');
   const termFeed = el('div', 'term-feed');
   const termEmpty = el('div', 'terminal-empty', 'no shell commands yet — when Claude runs Bash it shows here');
@@ -428,25 +461,88 @@ export function mountIdePane(mountEl, store, opts = {}) {
   // (debounced) on drag end. The grid-template is recomputed from these.
   let treeW = TREE_W_DEFAULT;
   let termH = TERM_H_DEFAULT;
+  // collapsed-region flags (FEATURE A), persisted in the same LAYOUT_KEY blob.
+  const collapsed = { tree: false, editor: false, terminal: false };
   (function restoreLayout() {
     const s = loadSizes(LAYOUT_KEY);
     if (s && typeof s.treeW === 'number' && isFinite(s.treeW)) treeW = clamp(s.treeW, TREE_W_MIN, TREE_W_MAX);
     if (s && typeof s.termH === 'number' && isFinite(s.termH)) termH = Math.max(TERM_H_MIN, s.termH);
+    if (s && s.collapsed && typeof s.collapsed === 'object') {
+      collapsed.tree = !!s.collapsed.tree;
+      collapsed.editor = !!s.collapsed.editor;
+      collapsed.terminal = !!s.collapsed.terminal;
+    }
   })();
 
-  // Build & apply grid-template-columns/rows from the current treeW / termH.
+  // Persist BOTH the drag sizes AND the collapsed flags together (debounced) so a
+  // collapse/expand or a resize never drops the other half of the layout state.
+  function persistLayout() { saveSizes(LAYOUT_KEY, { treeW, termH, collapsed: { ...collapsed } }); }
+
+  // Build & apply grid-template-columns/rows from the current treeW / termH AND
+  // the collapse flags. Collapsing a region shrinks its track to just its header
+  // strip; the freed space flows to the remaining flexible region.
   // Layout:  [tree treeW] [gutter 6px] [editor 1fr]   (columns)
   //          [editor 1fr] [gutter 6px] [terminal termH] [status auto]  (rows)
   // Status row spans all 3 columns; raw-screen overlay is absolute so it's free.
+  // - tree collapsed  -> col 1 becomes a thin rail (TREE_COLLAPSED_PX)
+  // - terminal collapsed -> row 3 becomes its header strip (TERM_COLLAPSED_PX)
+  // - editor collapsed -> row 1 becomes its tab+meta strip (EDITOR_COLLAPSED_PX),
+  //   handing the flex 1fr to the terminal. If BOTH editor + terminal collapse,
+  //   the editor keeps the 1fr (you can't collapse the only flexible region away).
   function applyGridTemplate() {
     const gridH = root.clientHeight || 0;
-    // clamp the terminal so it can't swallow the editor: <= 60% of grid height
-    const maxTerm = gridH > 0 ? Math.max(TERM_H_MIN, Math.floor(gridH * TERM_FRAC_MAX)) : Infinity;
-    const th = clamp(termH, TERM_H_MIN, maxTerm);
-    const tw = clamp(treeW, TREE_W_MIN, TREE_W_MAX);
+    // ---- columns: tree | gutter | editor
+    const tw = collapsed.tree ? TREE_COLLAPSED_PX : clamp(treeW, TREE_W_MIN, TREE_W_MAX);
     root.style.gridTemplateColumns = `${tw}px ${GUTTER_PX}px minmax(0, 1fr)`;
-    root.style.gridTemplateRows = `minmax(0, 1fr) ${GUTTER_PX}px ${th}px auto`;
+    // ---- rows: editor | gutter | terminal | status
+    let editorRow, termRow;
+    if (collapsed.editor && !collapsed.terminal) {
+      // editor collapsed -> strip; terminal takes the flexible space
+      editorRow = `${EDITOR_COLLAPSED_PX}px`;
+      termRow = 'minmax(0, 1fr)';
+    } else if (collapsed.terminal) {
+      // terminal collapsed -> header strip; editor takes the flexible space
+      // (covers terminal-only AND editor+terminal-both-collapsed: editor wins 1fr)
+      editorRow = 'minmax(0, 1fr)';
+      termRow = `${TERM_COLLAPSED_PX}px`;
+    } else {
+      // neither collapsed: editor flexes, terminal is its dragged px (60% ceiling)
+      const maxTerm = gridH > 0 ? Math.max(TERM_H_MIN, Math.floor(gridH * TERM_FRAC_MAX)) : Infinity;
+      editorRow = 'minmax(0, 1fr)';
+      termRow = `${clamp(termH, TERM_H_MIN, maxTerm)}px`;
+    }
+    root.style.gridTemplateRows = `${editorRow} ${GUTTER_PX}px ${termRow} auto`;
   }
+
+  // Toggle / apply collapse for one region. Reflects state to the root (CSS
+  // hooks the rail + chevron glyph), rebuilds the grid template, hides the now-
+  // inert resize gutter for that boundary, and persists. CM relayout is nudged so
+  // it re-measures into the new editor height (no-op for the <pre> fallback).
+  function applyCollapsedClasses() {
+    root.classList.toggle('tree-collapsed', collapsed.tree);
+    root.classList.toggle('editor-collapsed', collapsed.editor);
+    root.classList.toggle('terminal-collapsed', collapsed.terminal);
+    if (chevronEls.tree)     chevronEls.tree.textContent = collapsed.tree ? '▸' : '▾';
+    if (chevronEls.editor)   chevronEls.editor.textContent = collapsed.editor ? '▸' : '▾';
+    if (chevronEls.terminal) chevronEls.terminal.textContent = collapsed.terminal ? '▸' : '▾';
+    // a collapsed region's resize gutter is inert (hidden): tree gutter when the
+    // tree is a rail; the editor↔terminal gutter when either of them is collapsed.
+    gCol.classList.toggle('inert', collapsed.tree);
+    gRow.classList.toggle('inert', collapsed.editor || collapsed.terminal);
+  }
+  function toggleCollapse(region, force) {
+    if (!(region in collapsed)) return;
+    const next = typeof force === 'boolean' ? force : !collapsed[region];
+    if (next === collapsed[region]) return;
+    collapsed[region] = next;
+    applyCollapsedClasses();
+    applyGridTemplate();
+    persistLayout();
+    // let CM re-measure into the resized editor track next frame
+    if (cm && cm.view) { try { requestAnimationFrame(() => { if (cm && cm.view) cm.view.requestMeasure(); }); } catch (_) {} }
+  }
+
+  applyCollapsedClasses();
   applyGridTemplate();
 
   // tree ↔ editor (vertical gutter, drag x)
@@ -454,11 +550,11 @@ export function mountIdePane(mountEl, store, opts = {}) {
   attachDrag(gCol, {
     axis: 'x',
     onStart: () => { dragStartTreeW = treePane.getBoundingClientRect().width; },
-    onDelta: (dx) => { treeW = clamp(dragStartTreeW + dx, TREE_W_MIN, TREE_W_MAX); applyGridTemplate(); },
-    onEnd: () => { saveSizes(LAYOUT_KEY, { treeW, termH }); },
+    onDelta: (dx) => { if (collapsed.tree) return; treeW = clamp(dragStartTreeW + dx, TREE_W_MIN, TREE_W_MAX); applyGridTemplate(); },
+    onEnd: () => { persistLayout(); },
   });
   gCol.addEventListener('dblclick', () => {
-    treeW = TREE_W_DEFAULT; applyGridTemplate(); saveSizes(LAYOUT_KEY, { treeW, termH });
+    treeW = TREE_W_DEFAULT; applyGridTemplate(); persistLayout();
   });
 
   // editor ↔ terminal (horizontal gutter, drag y). Dragging DOWN grows the
@@ -468,15 +564,16 @@ export function mountIdePane(mountEl, store, opts = {}) {
     axis: 'y',
     onStart: () => { dragStartTermH = termPane.getBoundingClientRect().height; },
     onDelta: (dy) => {
+      if (collapsed.editor || collapsed.terminal) return; // gutter inert when collapsed
       const gridH = root.clientHeight || 0;
       const maxTerm = gridH > 0 ? Math.max(TERM_H_MIN, Math.floor(gridH * TERM_FRAC_MAX)) : Infinity;
       termH = clamp(dragStartTermH - dy, TERM_H_MIN, maxTerm);
       applyGridTemplate();
     },
-    onEnd: () => { saveSizes(LAYOUT_KEY, { treeW, termH }); },
+    onEnd: () => { persistLayout(); },
   });
   gRow.addEventListener('dblclick', () => {
-    termH = TERM_H_DEFAULT; applyGridTemplate(); saveSizes(LAYOUT_KEY, { treeW, termH });
+    termH = TERM_H_DEFAULT; applyGridTemplate(); persistLayout();
   });
 
   // Re-clamp the terminal height if the pane is resized (keeps the 60% ceiling
@@ -497,9 +594,12 @@ export function mountIdePane(mountEl, store, opts = {}) {
   let cmFailed = false;
   const langCache = new Map();        // langKey -> resolved CM extension
   let fallbackEl = null;              // <pre> fallback element (if used)
-  // bumps on every fallback render so a pending async hljs highlight pass can
-  // detect it was superseded (live-edit re-render) and skip painting stale tokens
+  // bumps on every fallback render so a pending async hljs highlight pass — AND a
+  // running typewriter reveal (FEATURE B) — can detect it was superseded (a newer
+  // live-edit re-render) and abort instead of painting stale tokens/chunks.
   let fallbackHlGen = 0;
+  // FEATURE B: handle for the in-flight hunk-reveal timer (so we can cancel it).
+  let fallbackRevealTimer = 0;
 
   // tabs: ordered most-recent-last; activeTab is the path shown.
   /** @type {string[]} */
@@ -634,7 +734,9 @@ export function mountIdePane(mountEl, store, opts = {}) {
   // render content via the highlighted <pre> fallback (no CM). This path renders
   // headless, so following MUST be correct here: we scroll the fallback's own
   // scroll container to the target line, flash it, and bind a manual-scroll watch.
-  function renderFallback(path, content, focusLine, follow) {
+  // When a live edit lands (`hunkNew` given) we don't snap the changed region in:
+  // we typewriter-REVEAL it (FEATURE B) to feel like it's being written.
+  function renderFallback(path, content, focusLine, follow, hunkNew) {
     if (editorEmpty.parentNode) editorEmpty.remove();
     if (cm && cm.view.dom.parentNode) cm.view.dom.remove();
     if (!fallbackEl) {
@@ -643,7 +745,8 @@ export function mountIdePane(mountEl, store, opts = {}) {
       editorWrap.append(note, fallbackEl);
       bindFallbackScrollWatch();
     }
-    const myGen = ++fallbackHlGen;   // invalidate any in-flight highlight pass
+    cancelFallbackReveal();          // stop any reveal from a prior render
+    const myGen = ++fallbackHlGen;   // invalidate any in-flight highlight pass + reveal
     fallbackEl.innerHTML = '';
     const lines = String(content == null ? '' : content).split('\n');
     // Each source line is its own .efline block (so offsetTop is meaningful for
@@ -664,10 +767,25 @@ export function mountIdePane(mountEl, store, opts = {}) {
       codeEls.push(codeEl);
     }
     fallbackEl.append(frag);
+
+    // Decide the changed-line REVEAL range (FEATURE B). The reveal is gated to a
+    // live follow-edit with a non-empty hunk; a plain tree/tab open just renders +
+    // flashes. We reveal [startIdx, endIdx] (0-based) where startIdx is the located
+    // hunk line and the span is hunk_new's own line count, clamped to the file.
+    let reveal = null;
+    if (follow && !followPaused && focusLine && focusLine > 0 && typeof hunkNew === 'string' && hunkNew.trim()) {
+      const startIdx = Math.max(0, Math.min(focusLine - 1, lines.length - 1));
+      const hunkLineCount = hunkNew.replace(/\n+$/, '').split('\n').length;
+      const endIdx = Math.max(startIdx, Math.min(startIdx + hunkLineCount - 1, lines.length - 1));
+      reveal = { startIdx, endIdx };
+    }
+
     // Highlight each line once hljs is ready. We tag the rendered content with a
     // gen token so a re-render (live edit re-fetch) that lands while a prior
-    // highlight pass is still pending can't paint stale tokens over new text.
-    highlightFallbackLines(path, lines, codeEls, myGen);
+    // highlight pass is still pending can't paint stale tokens over new text. The
+    // reveal range is SKIPPED here (the reveal owns those lines + re-highlights
+    // them itself as they settle), so the async pass can't clobber the animation.
+    highlightFallbackLines(path, lines, codeEls, myGen, reveal);
 
     if (focusLine && focusLine > 0) {
       const idx = Math.max(1, Math.min(focusLine, lines.length));
@@ -686,23 +804,131 @@ export function mountIdePane(mountEl, store, opts = {}) {
         scrollFallbackToLine(idx, false);
       }
     }
+
+    // Kick the typewriter reveal LAST (after layout + scroll anchor are set).
+    if (reveal) revealHunkInFallback(path, lines, codeEls, reveal, follow, myGen);
   }
 
   // Apply per-line hljs highlighting to an already-rendered fallback. Async: it
   // awaits the lazily-injected (vendored) hljs, then rewrites each .ef-code span's
   // innerHTML with token markup. Plain escaped text remains if hljs never loads,
   // a line is empty, or hljs throws. `gen` guards against a newer fallback render
-  // (live-edit re-fetch) superseding this pass mid-flight.
-  function highlightFallbackLines(path, lines, codeEls, gen) {
+  // (live-edit re-fetch) superseding this pass mid-flight. `skip` (a {startIdx,
+  // endIdx} range, optional) leaves those lines alone — they're under an active
+  // typewriter reveal which re-highlights them itself once each settles.
+  function highlightFallbackLines(path, lines, codeEls, gen, skip) {
     ensureHljs().then((hljs) => {
       if (!hljs || destroyed) return;             // graceful degrade -> plain text
       if (gen !== fallbackHlGen || !fallbackEl) return; // superseded by a re-render
       const lang = hljsLangFor(path);
       for (let i = 0; i < codeEls.length; i++) {
+        if (skip && i >= skip.startIdx && i <= skip.endIdx) continue; // reveal owns these
         const html = hljsLineHtml(hljs, lines[i], lang);
         if (html != null) codeEls[i].innerHTML = html;  // null -> keep plain text
       }
     });
+  }
+
+  // Cancel any in-flight typewriter reveal (FEATURE B). Bumping fallbackHlGen in
+  // renderFallback already makes the running reveal's gen check abort on its next
+  // tick; this also clears the pending timer immediately so nothing fires after a
+  // teardown / file switch.
+  function cancelFallbackReveal() {
+    if (fallbackRevealTimer) { try { clearTimeout(fallbackRevealTimer); } catch (_) {} fallbackRevealTimer = 0; }
+  }
+
+  // FEATURE B — STREAMING / TYPEWRITER REVEAL of a freshly-landed hunk.
+  // HONESTY: the transcript carries the WHOLE new hunk, not a sub-hunk character
+  // stream — there is nothing real to replay keystroke-by-keystroke. So this is a
+  // SIMULATED reveal: we already have the final text; we just unveil the changed
+  // region progressively (in small word/char chunks) so the user sees code "being
+  // written" instead of snapping in. It only paints text we genuinely received,
+  // never invents content, operates on the (read-only) fallback view, and settles
+  // to the exact full hljs-highlighted content.
+  //
+  // Mechanics: clear the changed lines, then walk a flat chunk list across the
+  // region (word-ish chunks, ~14ms/step). Follow-scroll tracks the revealing line.
+  // We hard-cap total duration (TYPEWRITER_BUDGET_MS) AND total revealed chars
+  // (TYPEWRITER_MAX_CHARS): if the hunk is big we reveal a prefix then SNAP the
+  // rest so it never lags. A newer render bumps fallbackHlGen and the gen check
+  // here aborts (the new render's own reveal takes over).
+  function revealHunkInFallback(path, lines, codeEls, range, follow, gen) {
+    const { startIdx, endIdx } = range;
+    // Build the ordered reveal plan: a list of {li, chunk} where li is the line
+    // index and chunk is the next ~word to append. Split on whitespace boundaries
+    // (keep the whitespace attached) so it reads like words appearing.
+    /** @type {{li:number, chunk:string}[]} */
+    const plan = [];
+    let totalChars = 0;
+    for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) {
+      const text = lines[li] || '';
+      codeEls[li].textContent = '';                 // start the changed line empty
+      // chunk into word-ish pieces: runs of non-space, each trailing run of space.
+      const pieces = text.match(/\S+\s*|\s+/g) || (text ? [text] : []);
+      for (const p of pieces) { plan.push({ li, chunk: p }); totalChars += p.length; }
+    }
+    if (!plan.length) return;   // nothing to reveal (all blank lines)
+
+    // running plain text per line (escaped on write); committed lazily.
+    const built = new Map();    // li -> string revealed so far
+    const ensure = (li) => { if (!built.has(li)) built.set(li, ''); return built.get(li); };
+
+    // Pace so the animated prefix fits inside the time budget, with a per-step
+    // floor (snappy) and ceiling (smooth). We cap BOTH dimensions: chars (don't
+    // animate more than TYPEWRITER_MAX_CHARS) AND steps-by-time (don't exceed the
+    // wall-clock budget even for a hunk of many tiny tokens — budget/MIN_STEP_MS
+    // steps max). Whichever cap bites first, the rest of the hunk SNAPS in.
+    const MIN_STEP_MS = 8, MAX_STEP_MS = 25;
+    const animChars = Math.min(totalChars, TYPEWRITER_MAX_CHARS);
+    // step count bounded by the char budget...
+    let stepsByChars = plan.length, acc = 0;
+    for (let i = 0; i < plan.length; i++) { acc += plan[i].chunk.length; if (acc > animChars) { stepsByChars = i + 1; break; } }
+    // ...AND by the time budget (so total animated time can't exceed the budget).
+    const stepsByTime = Math.max(1, Math.floor(TYPEWRITER_BUDGET_MS / MIN_STEP_MS));
+    const animSteps = Math.min(stepsByChars, stepsByTime);
+    const perStep = clamp(Math.floor(TYPEWRITER_BUDGET_MS / Math.max(1, animSteps)), MIN_STEP_MS, MAX_STEP_MS);
+
+    let i = 0;
+    const settleLine = (li) => {
+      // settle one line to its full text, then hljs-highlight it in place.
+      const full = lines[li] || '';
+      codeEls[li].textContent = full;
+      ensureHljs().then((hljs) => {
+        if (!hljs || destroyed || gen !== fallbackHlGen || !fallbackEl) return;
+        const html = hljsLineHtml(hljs, full, hljsLangFor(path));
+        if (html != null && codeEls[li]) codeEls[li].innerHTML = html;
+      });
+    };
+    const snapRest = () => {
+      // reveal everything left instantly (big hunk / over budget): settle every
+      // line in the region to its full, highlighted text in one shot.
+      for (let li = startIdx; li <= endIdx && li < codeEls.length; li++) settleLine(li);
+      if (follow && !followPaused) { lastFollowLine = Math.min(endIdx + 1, lines.length); scrollFallbackToLine(lastFollowLine, false); }
+      fallbackRevealTimer = 0;
+    };
+
+    const tick = () => {
+      // aborted by a newer render / teardown / file-switch?
+      if (destroyed || gen !== fallbackHlGen || !fallbackEl) { fallbackRevealTimer = 0; return; }
+      if (i >= animSteps) { snapRest(); return; }    // animated prefix done -> snap remainder
+      const { li, chunk } = plan[i];
+      const next = ensure(li) + chunk;
+      built.set(li, next);
+      if (codeEls[li]) codeEls[li].textContent = next;   // plain text while typing (escaped via textContent)
+      // when this step completes a line (next plan entry is a new line, or end),
+      // settle + highlight the finished line so revealed code colorizes as it lands.
+      const isLineEnd = (i + 1 >= plan.length) || plan[i + 1].li !== li;
+      if (isLineEnd) settleLine(li);
+      // follow the revealing line (1-based), honoring the pause state
+      if (follow && !followPaused) {
+        lastFollowLine = li + 1;
+        scrollFallbackToLine(li + 1, false);
+      }
+      i++;
+      fallbackRevealTimer = setTimeout(tick, perStep);
+    };
+    cancelFallbackReveal();
+    fallbackRevealTimer = setTimeout(tick, perStep);
   }
 
   // Scroll the fallback container so `line` (1-based) is vertically centered.
@@ -796,7 +1022,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     if (destroyed || myToken !== fetchToken) return; // a newer swap superseded us
 
     if (cmFailed || !cm) {
-      renderFallback(path, doc, targetLine, follow);
+      renderFallback(path, doc, targetLine, follow, hunkNew);
       return;
     }
     attachCmDom();
@@ -1116,6 +1342,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
   function clearEditor() {
     epath.textContent = '';
     for (const b of [...editorMeta.querySelectorAll('.badge')]) b.remove();
+    cancelFallbackReveal();          // stop any in-flight typewriter reveal (FEATURE B)
     if (cm && cm.view.dom.parentNode) cm.view.dom.remove();
     if (fallbackEl && fallbackEl.parentNode) { fallbackEl.remove(); fallbackEl = null; fallbackScrollBound = false; }
     if (!editorEmpty.parentNode) editorWrap.append(editorEmpty);
@@ -1518,6 +1745,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
     try { unsub(); } catch (_) {}
     if (layoutRO) { try { layoutRO.disconnect(); } catch (_) {} layoutRO = null; }
     if (followRAF) { try { cancelAnimationFrame(followRAF); } catch (_) {} followRAF = 0; }
+    cancelFallbackReveal();          // stop any in-flight typewriter reveal (FEATURE B)
     if (rawOn) {
       const client = getClient();
       if (client && typeof client.unwatchScreen === 'function' && watchedScreenSession) {
