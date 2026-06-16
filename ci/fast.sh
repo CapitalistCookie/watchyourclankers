@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# ci/fast.sh — watchyourclankers local pre-push gate (Constitution Principle IX).
+#
+# Iron-law of evidence: the literal success token `[ci-fast] ALL GREEN` is printed
+# on the VERY LAST line ONLY when every check below passed. Any failure exits
+# non-zero BEFORE the token is ever emitted. `set -o pipefail` so a piped check
+# can never mask an upstream failure. Target: < 60s.
+#
+# Checks:
+#   (a) py_compile every wyc/*.py and hooks/*.py
+#   (b) pytest -q  (if importable; otherwise a non-fatal WARN — pytest optional)
+#   (c) contracts/events.schema.json parses as JSON
+#   (d) GUARD: no live "0.0.0.0" bind in any wyc/*.py (Principle II) — allowed only in a comment
+#   (e) GUARD: no write-path into ~/.claude / /home/user/.claude under wyc/ or hooks/ (Principle I)
+set -euo pipefail
+
+# Resolve repo root from this script's location so it runs from anywhere.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+ROOT="$(cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd -P)"
+cd -- "${ROOT}"
+
+PY="${PYTHON:-python3}"
+
+fail() { echo "[ci-fast] FAIL: $*" >&2; exit 1; }
+note() { echo "[ci-fast] $*"; }
+
+START=$(date +%s)
+note "root: ${ROOT}"
+
+# --- (a) py_compile every backend + hook source -----------------------------
+note "(a) py_compile wyc/*.py hooks/*.py"
+mapfile -d '' PYFILES < <(find wyc hooks -type f -name '*.py' -print0 2>/dev/null || true)
+if [ "${#PYFILES[@]}" -eq 0 ]; then
+  note "  (no .py files under wyc/ or hooks/ yet — skipping compile)"
+else
+  "${PY}" -m py_compile "${PYFILES[@]}" || fail "py_compile failed"
+  note "  compiled ${#PYFILES[@]} file(s)"
+fi
+
+# --- (b) pytest (optional — WARN if not installed, do not fail) --------------
+# Real failures (exit 1-4) fail the gate. pytest's exit 5 = "no tests collected"
+# is a non-fatal WARN (the suite is still being built) — NOT a green-washing of a
+# failing run. pytest not importable at all is also a WARN, never a fail.
+note "(b) pytest -q"
+if "${PY}" -c 'import pytest' >/dev/null 2>&1; then
+  set +e
+  "${PY}" -m pytest -q
+  PYTEST_RC=$?
+  set -e
+  if [ "${PYTEST_RC}" -eq 0 ]; then
+    note "  pytest passed"
+  elif [ "${PYTEST_RC}" -eq 5 ]; then
+    note "  WARN: pytest collected no tests yet (exit 5) — none to run"
+  else
+    fail "pytest reported failures (exit ${PYTEST_RC})"
+  fi
+else
+  note "  WARN: pytest not importable — tests skipped (install pytest to run them)"
+fi
+
+# --- (c) the contract schema is valid JSON ----------------------------------
+note "(c) contracts/events.schema.json parses as JSON"
+SCHEMA="contracts/events.schema.json"
+if [ ! -f "${SCHEMA}" ]; then
+  fail "${SCHEMA} not found"
+fi
+"${PY}" - "${SCHEMA}" <<'PYEOF' || fail "events.schema.json is not valid JSON"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    json.load(fh)
+PYEOF
+note "  schema is valid JSON"
+
+# --- (d) GUARD: no live 0.0.0.0 bind in wyc/*.py (Principle II) --------------
+# A live bind = the literal 0.0.0.0 in actual code. Mentions inside comments,
+# docstrings, or string literals are allowed (the contract/server document
+# "never 0.0.0.0 by default"). We tokenize so a docstring mention can't be a
+# live bind, but a real `host="0.0.0.0"` (a STRING token containing it) IS caught
+# — string tokens that are NOT immediately preceded by a string token (i.e. not a
+# docstring statement) and contain the literal are treated as a config value.
+note "(d) guard: no live 0.0.0.0 bind under wyc/"
+BIND_HITS=""
+while IFS= read -r -d '' f; do
+  if "${PY}" - "$f" <<'PYEOF'
+import ast, io, re, sys, token, tokenize
+path = sys.argv[1]
+src = open(path, encoding="utf-8", errors="replace").read()
+bad = []
+try:
+    toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+except Exception:
+    # Unparseable here is fine; py_compile (check a) owns syntax errors.
+    sys.exit(0)
+# A live bind = a STRING token whose *value* IS the 0.0.0.0 address (optionally
+# "0.0.0.0:PORT", optionally whitespace-padded) AND that is used in value
+# position. We require the WHOLE string to be the address so prose that merely
+# mentions 0.0.0.0 — docstrings, argparse help, log messages — is not a bind.
+ADDR = re.compile(r"^\s*0\.0\.0\.0(?::\d+)?\s*$")
+for i, tk in enumerate(toks):
+    if tk.type != token.STRING:
+        continue
+    if "0.0.0.0" not in tk.string:
+        continue
+    try:
+        val = ast.literal_eval(tk.string)
+    except Exception:
+        continue
+    if not isinstance(val, str) or not ADDR.match(val):
+        continue  # mentioned inside prose, not an address literal -> not a bind
+    # It's a bare 0.0.0.0 address literal. Confirm it's value position, not the
+    # (impossible-but-defensive) docstring case: walk back over trivia.
+    j = i - 1
+    while j >= 0 and toks[j].type in (
+        token.NEWLINE, token.NL, token.INDENT, token.DEDENT,
+        token.COMMENT, tokenize.ENCODING,
+    ):
+        j -= 1
+    prev = toks[j] if j >= 0 else None
+    if prev is None or prev.type == token.STRING:
+        continue
+    if prev.type == token.OP and prev.string == ":":
+        continue
+    bad.append(tk.start[0])
+sys.exit(1 if bad else 0)
+PYEOF
+  then :; else
+    BIND_HITS="${BIND_HITS} $f"
+  fi
+done < <(find wyc -type f -name '*.py' -print0 2>/dev/null || true)
+if [ -n "${BIND_HITS}" ]; then
+  fail "live '0.0.0.0' bind found (Principle II — loopback only) in:${BIND_HITS}"
+fi
+note "  no live 0.0.0.0 bind"
+
+# --- (e) GUARD: no write-path into ~/.claude under wyc/ or hooks/ ------------
+# Principle I (observer, never actor): the watcher must never write to the
+# observed tree. Flag any open(..., 'w'|'a'|'x'...) or .write_text/.write_bytes
+# whose target string mentions the .claude home. Reads are fine.
+note "(e) guard: no write-path into ~/.claude under wyc/ or hooks/"
+ACTOR_HITS=""
+while IFS= read -r -d '' f; do
+  if "${PY}" - "$f" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+# Tokens that denote the observed home tree.
+CLAUDE = r"(?:~/\.claude|/home/user/\.claude|CLAUDE_HOME|SESSIONS_DIR|PROJECTS_DIR)"
+bad = []
+# 1) open(<...claude...>, '<mode with w/a/x/+>')
+for m in re.finditer(r"open\s*\(([^)]*)\)", src, re.DOTALL):
+    args = m.group(1)
+    if re.search(CLAUDE, args) and re.search(r"['\"][rbt]*[wax+][rbt+]*['\"]", args):
+        bad.append("open(write) -> .claude")
+# 2) <expr mentioning .claude>.write_text(/.write_bytes(  — within a small window
+for m in re.finditer(r"\.write_(?:text|bytes)\s*\(", src):
+    head = src[max(0, m.start() - 200):m.start()]
+    seg = head.rsplit("\n", 1)[-1]            # same logical line-ish
+    if re.search(CLAUDE, seg):
+        bad.append(".write_text/.write_bytes -> .claude")
+sys.exit(1 if bad else 0)
+PYEOF
+  then :; else
+    ACTOR_HITS="${ACTOR_HITS} $f"
+  fi
+done < <(find wyc hooks -type f -name '*.py' -print0 2>/dev/null || true)
+if [ -n "${ACTOR_HITS}" ]; then
+  fail "observer-never-actor violation (Principle I — write-path into ~/.claude) in:${ACTOR_HITS}"
+fi
+note "  no write-path into ~/.claude"
+
+# --- all green --------------------------------------------------------------
+ELAPSED=$(( $(date +%s) - START ))
+note "all checks passed in ${ELAPSED}s"
+echo "[ci-fast] ALL GREEN"

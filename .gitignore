@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+/data/
+*.log
+.DS_Store
+.cookie_secret
+.wyc_token
+*.local

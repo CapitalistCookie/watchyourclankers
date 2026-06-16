@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/CapitalistCookie/watchyourclankers/contracts/events.schema.json",
+  "title": "watchyourclankers wire protocol",
+  "description": "WebSocket messages between the wyc watcher daemon (server) and the browser. SINGLE SOURCE OF TRUTH for the wire, mirrored in wyc/contract.py. Every message is an envelope discriminated by `t`. Protocol version is `v`. Server->client messages carry a monotonic `seq` for snapshot-then-stream gap recovery.",
+  "type": "object",
+  "required": ["t", "v"],
+  "properties": {
+    "t": {"type": "string"},
+    "v": {"type": "integer", "const": 1}
+  },
+  "$defs": {
+    "Kind": {
+      "type": "string",
+      "description": "The surface a tool action maps to. TOTAL COVERAGE: every Claude tool action resolves to one of these.",
+      "enum": ["edit", "write", "read", "bash", "search", "task", "todo", "web", "other"]
+    },
+    "Activity": {
+      "type": "object",
+      "description": "One tool action by a session or one of its sub-agents. The unit the UI follows.",
+      "required": ["seq", "ts", "session_id", "thread_id", "kind", "tool"],
+      "additionalProperties": false,
+      "properties": {
+        "seq": {"type": "integer", "description": "monotonic per-server sequence"},
+        "ts": {"type": "number", "description": "epoch seconds UTC of the tool action"},
+        "session_id": {"type": "string"},
+        "agent_id": {"type": ["string", "null"], "description": "sub-agent / workflow agent id, or null for the main thread"},
+        "thread_id": {"type": "string"},
+        "kind": {"$ref": "#/$defs/Kind"},
+        "tool": {"type": "string", "description": "raw tool name e.g. Edit, Write, Bash, Grep, Task"},
+        "file_path": {"type": ["string", "null"]},
+        "line": {"type": ["integer", "null"], "description": "best-effort focus line for scroll-to"},
+        "hunk_old": {"type": ["string", "null"], "description": "Edit old_string (redacted of secrets)"},
+        "hunk_new": {"type": ["string", "null"], "description": "Edit new_string / Write content (redacted)"},
+        "detail": {"type": ["string", "null"], "description": "bash command, search pattern, task subject, etc. (redacted)"},
+        "status": {"type": "string", "enum": ["start", "ok", "error"], "default": "start"}
+      }
+    },
+    "Terminal": {
+      "type": "object",
+      "description": "Shell output for a bash Activity. May arrive as one chunk (from transcript tool_result, on completion) or many chunks (from clanker-style PTY capture, live). Correlate to the bash Activity via ref_seq.",
+      "required": ["seq", "ts", "session_id", "thread_id", "ref_seq", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "seq": {"type": "integer"},
+        "ts": {"type": "number"},
+        "session_id": {"type": "string"},
+        "agent_id": {"type": ["string", "null"]},
+        "thread_id": {"type": "string"},
+        "ref_seq": {"type": "integer", "description": "seq of the bash Activity this output belongs to"},
+        "stream": {"type": "string", "enum": ["stdout", "stderr", "mixed"], "default": "mixed"},
+        "data": {"type": "string", "description": "output chunk, may contain ANSI (redacted of secrets)"},
+        "done": {"type": "boolean", "default": false, "description": "true when the command has finished"},
+        "exit_code": {"type": ["integer", "null"]}
+      }
+    },
+    "Session": {
+      "type": "object",
+      "description": "A live (or recently-ended) Claude Code process.",
+      "required": ["id", "thread_id", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "description": "sessionId (uuid)"},
+        "pid": {"type": ["integer", "null"]},
+        "name": {"type": ["string", "null"], "description": "operator-given session name (e.g. comms4)"},
+        "status": {"type": "string", "enum": ["busy", "idle", "ended"]},
+        "cwd": {"type": ["string", "null"]},
+        "project": {"type": ["string", "null"], "description": "canonical project via clanker resolve_project(cwd)"},
+        "thread_id": {"type": "string"},
+        "model": {"type": ["string", "null"]},
+        "started_at": {"type": ["number", "null"]},
+        "updated_at": {"type": ["number", "null"]},
+        "current_surface": {"$ref": "#/$defs/Kind", "description": "what Claude is doing right now"},
+        "current_file": {"type": ["string", "null"]},
+        "subagents": {"type": "array", "items": {"type": "string"}, "description": "active sub-agent ids"}
+      }
+    },
+    "Thread": {
+      "type": "object",
+      "description": "A unit of work that spans handoff-leapfrogged sessions. Repo is the container; stitched by fuzzy name-stem + handoff-doc lineage + time-contiguity, with operator override.",
+      "required": ["id", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string", "description": "human label, usually the name-stem (e.g. comms)"},
+        "project": {"type": ["string", "null"]},
+        "session_ids": {"type": "array", "items": {"type": "string"}, "description": "ordered oldest->newest (the leapfrog chain)"},
+        "lead_session_id": {"type": ["string", "null"], "description": "the currently-active session in the chain"},
+        "created_at": {"type": ["number", "null"]},
+        "updated_at": {"type": ["number", "null"]},
+        "stitch": {"type": "array", "items": {"type": "string"}, "description": "evidence: name-stem|handoff-doc|time|manual"}
+      }
+    }
+  },
+  "oneOf": [
+    {"title": "hello", "type": "object", "additionalProperties": false, "required": ["t", "v", "server_ts", "protocol"], "properties": {"t": {"const": "hello"}, "v": {"const": 1}, "server_ts": {"type": "number"}, "protocol": {"type": "integer"}, "redaction": {"type": "boolean", "description": "secret redaction active in render path"}}},
+    {"title": "snapshot", "type": "object", "additionalProperties": false, "required": ["t", "v", "seq", "server_ts", "threads", "sessions"], "properties": {"t": {"const": "snapshot"}, "v": {"const": 1}, "seq": {"type": "integer"}, "server_ts": {"type": "number"}, "threads": {"type": "array", "items": {"$ref": "#/$defs/Thread"}}, "sessions": {"type": "array", "items": {"$ref": "#/$defs/Session"}}, "recent": {"type": "array", "items": {"$ref": "#/$defs/Activity"}, "description": "tail of recent activities for warm-start"}}},
+    {"title": "activity", "type": "object", "additionalProperties": false, "required": ["t", "v", "activity"], "properties": {"t": {"const": "activity"}, "v": {"const": 1}, "activity": {"$ref": "#/$defs/Activity"}}},
+    {"title": "terminal", "type": "object", "additionalProperties": false, "required": ["t", "v", "terminal"], "properties": {"t": {"const": "terminal"}, "v": {"const": 1}, "terminal": {"$ref": "#/$defs/Terminal"}}},
+    {"title": "session_update", "type": "object", "additionalProperties": false, "required": ["t", "v", "seq", "session"], "properties": {"t": {"const": "session_update"}, "v": {"const": 1}, "seq": {"type": "integer"}, "session": {"$ref": "#/$defs/Session"}}},
+    {"title": "thread_update", "type": "object", "additionalProperties": false, "required": ["t", "v", "seq", "thread"], "properties": {"t": {"const": "thread_update"}, "v": {"const": 1}, "seq": {"type": "integer"}, "thread": {"$ref": "#/$defs/Thread"}}},
+    {"title": "subscribe", "type": "object", "additionalProperties": false, "required": ["t", "v", "scope"], "properties": {"t": {"const": "subscribe"}, "v": {"const": 1}, "scope": {"type": "string", "description": "'all' | thread:<id> | session:<id>"}}},
+    {"title": "resync", "type": "object", "additionalProperties": false, "required": ["t", "v", "since"], "properties": {"t": {"const": "resync"}, "v": {"const": 1}, "since": {"type": "integer", "description": "last seq the client holds; server replies with snapshot if gap"}}},
+    {"title": "annotate", "type": "object", "additionalProperties": false, "required": ["t", "v", "action", "target"], "properties": {"t": {"const": "annotate"}, "v": {"const": 1}, "action": {"type": "string", "enum": ["pin", "freeze", "flag", "unpin", "unfreeze", "unflag"]}, "target": {"type": "object", "description": "{session_id|thread_id, file_path?, line?, note?} — STUB in slice 1, write path lands later"}}},
+    {"title": "thread_override", "type": "object", "additionalProperties": false, "required": ["t", "v", "op"], "properties": {"t": {"const": "thread_override"}, "v": {"const": 1}, "op": {"type": "string", "enum": ["merge", "split", "alias"]}, "args": {"type": "object", "description": "operator correction of thread stitching; persisted as sticky override + alias"}}}
+  ]
+}
