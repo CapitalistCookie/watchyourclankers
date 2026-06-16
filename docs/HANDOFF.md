@@ -1,4 +1,4 @@
-<!-- HANDOFF-HEAD: 208fb39 -->
+<!-- HANDOFF-HEAD: 8362d08 -->
 # watchyourclankers — Session Handoff (2026-06-16, framework remediation)
 
 **Repo:** `/home/user/projects/watchyourclankers` · github.com/CapitalistCookie/watchyourclankers (public) · `main`
@@ -18,6 +18,13 @@ An audit found the constitution promised 11 live gates but ~4 were `(planned)` i
 
 ## Read order (architecture)
 `CLAUDE.md` → `.specify/memory/constitution.md` (Principles I–XI, each with an `[enforcer:]` tag) → `wyc/contract.py` + `contracts/events.schema.json` (the seam) → `docs/MASTER_PLAN.md` (waves + Remediation §) → `docs/MODULE_BUILD_CHECKLIST.md` (gates) → `docs/REMEDIATION.md` + `docs/LESSONS.md`.
+
+## Just landed (2026-06-16, post-remediation)
+- **Harness self-enforcement (audit):** `ci/interaction.mjs` (real pointer-drag DOM probe) + rung (o)/`check_interaction_tests.py` — interaction code can't reach green without a live DOM test; the fast gate runs it vs `:8900` and BLOCKS a broken drag. Constitution 1.2.0, `LESSONS` L7.
+- **3 drag bugs fixed:** `onDelta(dx,dy)` wrong-arg on the vertical gutters of `ide.js` + `mosaic.js` + `debug.js` (H9 enumeration found all three).
+- **`Cache-Control: no-cache`** on the daemon (`server.py`) — frontend edits show on a NORMAL refresh (no more "deployed but not fixed").
+- **read-scan (`web/readscan.js` + ide wiring):** a "reading" highlight sweeps the read range when Claude reads a file. Fallback-only sweep, operator-verified for feel.
+- **word-by-word reveal:** diagnosed — it was STALE CACHE (fixed); the fallback is char-level (R08), and **CodeMirror SNAPS** (no reveal). Making CM reveal char-by-char is the residual, but **CM can't load on this box** so it's not DOM-testable here (collides with rung o) — needs a decision (port reveal into CM + operator-verify, or make the testable fallback canonical).
 
 ## NOT done / next session
 1. **W4 — merge into clanker** (needs operator go): host `/ws` + static under clanker `serve.py`; state under `/data/clanker/watchyourclankers/`; reuse `resolve_project` + HMAC/TOTP; optionally feed the terminal from clanker's PTY capture.
