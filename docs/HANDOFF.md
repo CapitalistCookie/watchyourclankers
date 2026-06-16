@@ -1,4 +1,4 @@
-<!-- HANDOFF-HEAD: 216b095 -->
+<!-- HANDOFF-HEAD: 34deeb8 -->
 # watchyourclankers — Session Handoff (2026-06-16, framework remediation)
 
 **Repo:** `/home/user/projects/watchyourclankers` · github.com/CapitalistCookie/watchyourclankers (public) · `main`
