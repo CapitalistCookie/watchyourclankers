@@ -12,7 +12,7 @@ A web UI where you watch Claude Code work **like a 3rd person looking over its s
   + /subagents/agent-*.jsonl ─┘   (poll+tail+stitch)        snapshot-then-stream
 PostToolUse hook (enrichment) ────┘
 ```
-- **Feed**: `sessions.py` (live registry) + `transcripts.py` (tail+parse, incl. subagents) + `threads.py` (handoff-spanning stitch) + `watcher.py` (orchestrate → monotonic wire stream).
+- **Feed**: `sessions.py` (live registry) + `transcripts.py` (tail+parse, incl. subagents) + `tmux.py` (tmux identity + liveness + raw-screen, W1.5) + `threads.py` (handoff-spanning stitch) + `watcher.py` (orchestrate → monotonic wire stream).
 - **Serve**: `server.py` (aiohttp WS + static + loopback/token auth) + `handoff.py` (one-liner generator) + `hooks/post-tool-use.py` (enrichment) + `redact.py` (parent). Package entrypoints: `wyc/__init__.py` (exports) + `wyc/__main__.py` (`python -m wyc serve`).
 - **Web**: `client.js`/`store.js` (WS + snapshot-then-stream + seq-gap), `ide.js` (IDE pane), `mosaic.js`+`menu.js` (tiling + ⌘K + settings), `app.js`/`index.html` (shell).
 - **State (ours)**: `/data/clanker/watchyourclankers/` — thread overrides, aliases, annotations.

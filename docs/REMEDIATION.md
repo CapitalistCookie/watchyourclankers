@@ -1,6 +1,6 @@
 # watchyourclankers — Framework Remediation (2026-06-16)
 
-**Status:** IN PROGRESS · owner CapitalistCookie · HEAD-at-open `f632b4e`
+**Status:** COMPLETE (all 11 items CLOSED, `ci/fast.sh` ALL GREEN) · owner CapitalistCookie · HEAD-at-open `f632b4e` · landed `3f3df9c`+handoff
 
 ## Why this exists
 
@@ -43,7 +43,7 @@ proof. These enforcers persist, so the next session inherits the same forcing fu
 |----|------|----------|--------|
 | R01 | No constitution principle claims a phantom gate (Principle IX self-true; VII/VIII/Governance made real-or-amended) | tools/check_constitution_gates.py | CLOSED |
 | R02 | No orphan source file — every wyc/*.py + web/*.js maps to a spec or docs/UX_LOG.md | tools/check_coverage.py | CLOSED |
-| R03 | docs/HANDOFF.md cited HEAD == git HEAD (handoff can't silently rot) | tools/check_handoff_fresh.py | OPEN |
+| R03 | docs/HANDOFF.md cited HEAD == git HEAD (handoff can't silently rot) | tools/check_handoff_fresh.py | CLOSED |
 | R04 | Behavioral test rung live — `node --test web/*.test.mjs` wired into ci/fast.sh | ci/fast.sh:node --test | CLOSED |
 | R05 | one-panel-per-project (auto-assignment dedups by project, not thread id) | web/assign.test.mjs | CLOSED |
 | R06 | editor↔terminal drag fixed (no always-goes-down; ResizeObserver can't clobber termH) | web/idegeom.test.mjs | CLOSED |
