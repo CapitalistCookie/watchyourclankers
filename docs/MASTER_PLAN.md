@@ -45,6 +45,15 @@ behavioral tests. Constitution bumped 1.0.0 → 1.1.0.
 ## Merge-into-clanker seam
 Clanker is Python+aiohttp+JSONL, dashboard on :8899, SSOT `/data/clanker/`, already PTY-streams tmux. Merge path: host the `/ws` + static under clanker `serve.py`; write state under `/data/clanker/watchyourclankers/`; reuse `resolve_project(cwd)` and HMAC+TOTP auth; optionally feed the terminal surface from clanker's existing PTY capture.
 
+**Dual-home plan (2026-06-16): merge into clanker AND stay a standalone repo, zero forked code.**
+Distribution = **pip-install-from-git** (operator's call); clanker UI = a **"Spectate" nav tab → `/wyc/`**. Four host-seams; 3 already existed:
+- **M0a DONE** — `build_app(watcher, *, auth=…, url_prefix='')`: default installs the local-token auth (standalone); `auth=None` installs none (clanker's parent middleware owns auth on the `add_subapp('/wyc/', …)` mount); a custom middleware can be injected. `$WYC_DATA_DIR` relocates state. (`tests/test_dual_home.py`.)
+- **M0b DONE** — prefix-aware frontend: every same-origin URL derives from a `BASE` (from `import.meta.url`), so the UI serves at `/` standalone and `/wyc/` embedded with no server rewriting. (`web/app-config.js` BASE/apiUrl; relative `index.html`/`styles.css`; `ide.js` `import.meta.url` assets.)
+- **M1 DONE** — pip-installable: `pyproject.toml` (`pip install git+https://github.com/CapitalistCookie/watchyourclankers`); `setup.py` build_py copies root `web/`+`contracts/` under the package so the wheel ships the UI (verified: wheel→venv→`_web_dir()` resolves the installed copy, `wyc` console script runs). (`tests/test_packaging.py`; `ci/full.sh` wheel smoke.)
+- **`resolve_project` already injected** — `wyc/threads.py` soft-imports `clanker.lib.projects.resolve_project`, falls back to its own.
+- **M2 (clanker repo, needs operator + that repo)** — add the dep, `add_subapp('/wyc/', build_app(Watcher(), auth=clanker_auth, url_prefix='/wyc'))`, the Spectate nav tab.
+- **M3 (optional)** — feed the terminal from clanker's PTY (OI-1).
+
 ## Decisions (D-log)
 - **D1** Frontend = clanker's idiom (vanilla JS), not React (operator: "React is overkill; go beyond clanker, custom + performant"). CodeMirror 6 via CDN for the editor surface.
 - **D2** Layout = dynamic tiling mosaic.

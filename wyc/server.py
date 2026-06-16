@@ -225,11 +225,16 @@ async def handle_healthz(request: web.Request) -> web.Response:
 
 
 def _web_dir() -> Optional[str]:
-    """Path to the web/ dir (built by the IDE agent) if present."""
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    web_dir = os.path.join(here, "web")
-    if os.path.isdir(web_dir) and os.path.isfile(os.path.join(web_dir, "index.html")):
-        return web_dir
+    """Path to the web/ dir, found in either layout (M1 packaging):
+      1. INSTALLED (wheel): wyc/web/ next to this module — setup.py's build_py
+         copies the repo-root web/ under the package so it ships in the wheel.
+      2. DEV / editable / source checkout: web/ at the repo root (sibling of wyc/).
+    Returns the first whose index.html exists, else None (placeholder served)."""
+    pkg = os.path.dirname(os.path.abspath(__file__))            # .../wyc
+    for web_dir in (os.path.join(pkg, "web"),                   # 1) packaged (wheel)
+                    os.path.join(os.path.dirname(pkg), "web")):  # 2) repo root (dev)
+        if os.path.isfile(os.path.join(web_dir, "index.html")):
+            return web_dir
     return None
 
 

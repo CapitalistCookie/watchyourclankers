@@ -59,6 +59,13 @@ cd watchyourclankers
 python3 -u -m wyc serve
 ```
 
+Or install it as a package — the wheel bundles the frontend, so no clone is needed (this is how [clanker](#merges-into-clanker) consumes it):
+
+```bash
+pip install git+https://github.com/CapitalistCookie/watchyourclankers
+wyc serve
+```
+
 On start the daemon prints the URL with the token baked in, e.g.:
 
 ```

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "watchyourclankers"
+version = "0.1.0"
+description = "Read-only IDE-spectator for Claude Code — watch it work live, over its shoulder, across every session on the machine."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "CapitalistCookie" }]
+keywords = ["claude-code", "observability", "ide", "spectator", "clanker"]
+dependencies = ["aiohttp>=3.9"]
+
+[project.urls]
+Homepage = "https://github.com/CapitalistCookie/watchyourclankers"
+Repository = "https://github.com/CapitalistCookie/watchyourclankers"
+
+# `wyc` console script == `python -m wyc` (standalone). When clanker depends on
+# this package it imports wyc.server.build_app(...) directly and mounts it as a
+# sub-app — see docs/MASTER_PLAN.md "Merge-into-clanker seam".
+[project.scripts]
+wyc = "wyc.__main__:main"
+
+[tool.setuptools]
+# Only the Python package is declared here; the frontend (web/) + the wire schema
+# (contracts/) live at the repo ROOT (unchanged — gates/H15 reference them there)
+# and are copied UNDER the package at build time by setup.py's custom build_py, so
+# they ship in the wheel as wyc/web/** and wyc/contracts/** and are found by
+# wyc.server._web_dir() in an installed (non-editable) layout.
+packages = ["wyc"]

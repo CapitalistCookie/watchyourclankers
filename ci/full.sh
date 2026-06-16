@@ -41,4 +41,22 @@ else
   echo "[ci-full] node absent — render smoke SKIPPED"
 fi
 
+# packaging smoke (M1 — pip-install-from-git): the wheel MUST ship the frontend
+# (wyc/web/**) or an installed copy has no UI. Build a wheel and assert the assets
+# are inside. WARN-skip if the build toolchain is unavailable, but FAIL on a real
+# regression (build succeeds yet the assets are missing).
+echo "[ci-full] packaging smoke (wheel ships wyc/web/)"
+PKG_TMP="$(mktemp -d)"
+if python3 -m pip wheel --no-deps -q -w "$PKG_TMP" . > /tmp/wyc_full_wheel.log 2>&1; then
+  WHL="$(ls "$PKG_TMP"/watchyourclankers-*.whl 2>/dev/null | head -1)"
+  if [ -n "$WHL" ] && python3 -c "import zipfile,sys; n=zipfile.ZipFile(sys.argv[1]).namelist(); sys.exit(0 if 'wyc/web/index.html' in n and 'wyc/web/vendor/codemirror.bundle.js' in n else 1)" "$WHL"; then
+    echo "[ci-full]   wheel ships wyc/web/index.html + the CM bundle"
+  else
+    echo "[ci-full] FAIL: built wheel is missing wyc/web/ assets (a pip-install would have no UI)"; rm -rf "$PKG_TMP"; exit 1
+  fi
+else
+  echo "[ci-full]   WARN: wheel build unavailable — packaging smoke skipped (see /tmp/wyc_full_wheel.log)"
+fi
+rm -rf "$PKG_TMP"
+
 echo "[ci-full] ALL GREEN"
