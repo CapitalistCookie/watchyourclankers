@@ -35,6 +35,7 @@ from . import redact as _redact
 from .sessions import SessionPoller
 from .transcripts import TranscriptReader
 from .threads import ThreadStitcher
+from .tmux import TmuxSource
 
 POLL_INTERVAL = 1.5           # seconds between session polls (FR-001)
 REPLAY_MAXLEN = 2000          # bounded replay buffer for since(seq)
@@ -60,6 +61,27 @@ def _parse_exit_code(text: Optional[str]) -> Optional[int]:
     return None
 
 
+def _frame_dims(frame: str) -> tuple[int, int]:
+    """Best-effort (cols, rows) for a captured tmux frame.
+
+    rows = line count; cols = widest line (after stripping ANSI/CR so escape
+    sequences don't inflate the width). Both 0 for an empty frame. Advisory only
+    — the literal text is the source of truth; cols/rows just help the UI size a
+    terminal surface."""
+    if not frame:
+        return (0, 0)
+    import re
+    _ansi = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+    lines = frame.split("\n")
+    rows = len(lines)
+    cols = 0
+    for ln in lines:
+        w = len(_ansi.sub("", ln).rstrip("\r"))
+        if w > cols:
+            cols = w
+    return (cols, rows)
+
+
 class _FileCursor:
     """Tail offset bookkeeping for one transcript/sub-agent file."""
     __slots__ = ("offset",)
@@ -82,10 +104,15 @@ class Watcher:
     def __init__(self, poller: Optional[SessionPoller] = None,
                  reader: Optional[TranscriptReader] = None,
                  stitcher: Optional[ThreadStitcher] = None,
+                 tmux: Optional[TmuxSource] = None,
                  poll_interval: float = POLL_INTERVAL) -> None:
         self._poller = poller or SessionPoller()
         self._reader = reader or TranscriptReader()
         self._stitcher = stitcher or ThreadStitcher()
+        # ONE shared TmuxSource: its ~1s pane cache makes identity_for() cheap
+        # across every session in a tick. Injectable for tests; robust if tmux is
+        # absent (panes()/identity_for() return []/None -> unchanged behavior).
+        self._tmux = tmux or TmuxSource()
         self._poll_interval = poll_interval
 
         self._seq = 0
@@ -100,6 +127,12 @@ class Watcher:
         self._subscribers: list[asyncio.Queue] = []
         self._recent_acts: deque = deque(maxlen=200)        # warm-start tail
         self._running = False
+
+        # -- live screen watching (tmux capture-pane stream) ------------------
+        # Refcount watchers per tmux pane so N clients watching the same pane share
+        # ONE capture loop. pane -> count; pane -> asyncio.Task running the stream.
+        self._screen_watchers: dict[str, int] = {}
+        self._screen_tasks: dict[str, asyncio.Task] = {}
 
     # -- seq + broadcast --------------------------------------------------
     def _next_seq(self) -> int:
@@ -291,7 +324,13 @@ class Watcher:
             # signals from this poll.
             new_lines = self._tail_session(sess)
 
-            # Assign thread (clanker repo + name-stem + handoff + time).
+            # Tmux identity: stamp the session with its live pane/session/group and
+            # stash a high-priority tmux thread-key for the stitcher. The shared
+            # TmuxSource caches its pane list ~1s, so this is cheap for every
+            # session in the tick. No-op if tmux is absent (identity_for -> None).
+            self._apply_tmux_identity(sess)
+
+            # Assign thread (tmux group + clanker repo + name-stem + handoff + time).
             thread = self._stitcher.assign(sess, new_lines)
             sess.thread_id = thread.id
 
@@ -304,6 +343,9 @@ class Watcher:
                 or prev.current_surface != sess.current_surface
                 or prev.current_file != sess.current_file
                 or prev.subagents != sess.subagents
+                or prev.tmux_pane != sess.tmux_pane
+                or prev.tmux_session != sess.tmux_session
+                or prev.tmux_group != sess.tmux_group
             )
             self._sessions[sess.id] = sess
 
@@ -330,6 +372,101 @@ class Watcher:
                 sess.status = "ended"
                 self._broadcast(contract.session_update(self._next_seq(), sess),
                                 droppable=False)
+
+    # -- tmux identity ----------------------------------------------------
+    def _apply_tmux_identity(self, sess: contract.Session) -> None:
+        """Stamp ``sess`` with its live tmux pane/session/group and stash a
+        transient ``tmux_key`` for the stitcher. Fully best-effort: any tmux
+        failure leaves the session unchanged (identity-less sessions still
+        stitch by name/handoff/time)."""
+        try:
+            ident = self._tmux.identity_for(sess.pid)
+        except Exception:
+            ident = None
+        if not ident:
+            return
+        sess.tmux_session = ident.get("tmux_session")
+        sess.tmux_group = ident.get("tmux_group")
+        sess.tmux_pane = ident.get("pane")
+        # Transient attribute the stitcher reads (it's not a wire field of its own;
+        # the durable identity is the three tmux_* fields above + the thread it
+        # produces). Group wins; else session name with a -<N> suffix stripped.
+        try:
+            sess.tmux_key = self._tmux.thread_key(ident)  # type: ignore[attr-defined]
+        except Exception:
+            sess.tmux_key = None  # type: ignore[attr-defined]
+
+    # -- live screen watching (tmux capture-pane) -------------------------
+    def watch_screen(self, session_id: str) -> None:
+        """Begin streaming raw rendered ``Screen`` frames for a session's tmux
+        pane to all subscribers. Refcounted per pane: the first watcher of a pane
+        spawns one capture loop; later watchers share it. No-op (graceful) if the
+        session is unknown or has no tmux pane."""
+        sess = self._sessions.get(session_id)
+        if sess is None or not sess.tmux_pane:
+            return  # nothing to mirror (no pane / unknown session)
+        pane = sess.tmux_pane
+        self._screen_watchers[pane] = self._screen_watchers.get(pane, 0) + 1
+        if self._screen_watchers[pane] > 1:
+            return  # a capture loop is already running for this pane
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            # No running loop (e.g. a unit test calling without a loop): leave the
+            # refcount bumped but don't spawn; a later call under a loop will start.
+            return
+        self._screen_tasks[pane] = loop.create_task(
+            self._stream_screen(pane, session_id))
+
+    def unwatch_screen(self, session_id: str) -> None:
+        """Stop one watcher of a session's pane. When the last watcher leaves, the
+        capture loop is cancelled. No-op if the session/pane wasn't being watched."""
+        sess = self._sessions.get(session_id)
+        if sess is None or not sess.tmux_pane:
+            return
+        pane = sess.tmux_pane
+        n = self._screen_watchers.get(pane, 0)
+        if n <= 0:
+            return
+        n -= 1
+        if n > 0:
+            self._screen_watchers[pane] = n
+            return
+        # Last watcher gone: cancel + drop the capture loop.
+        self._screen_watchers.pop(pane, None)
+        task = self._screen_tasks.pop(pane, None)
+        if task is not None:
+            task.cancel()
+
+    async def _stream_screen(self, pane: str, session_id: str) -> None:
+        """Consume ``TmuxSource.stream(pane)`` and broadcast redacted Screen frames.
+
+        Each changed frame becomes a :class:`contract.Screen` (REDACTED before the
+        wire — Principle II) and is broadcast drop-slow, same path as
+        activity/terminal (a fast screen feed must never block session/thread
+        updates). thread_id is resolved fresh per frame from the current session."""
+        try:
+            async for frame in self._tmux.stream(pane):
+                sess = self._sessions.get(session_id)
+                thread_id = sess.thread_id if sess is not None else ""
+                cols, rows = _frame_dims(frame)
+                scr = contract.Screen(
+                    seq=self._next_seq(),
+                    ts=time.time(),
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    data=_redact.redact(frame) or "",
+                    cols=cols,
+                    rows=rows,
+                )
+                self._broadcast(contract.screen_msg(scr), droppable=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A streaming error must not crash the watcher; just stop this pane's
+            # loop and clear its bookkeeping so a re-watch can restart cleanly.
+            self._screen_watchers.pop(pane, None)
+            self._screen_tasks.pop(pane, None)
 
     # -- Protocol: run ----------------------------------------------------
     async def run(self) -> None:

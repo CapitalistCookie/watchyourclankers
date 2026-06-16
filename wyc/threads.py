@@ -153,6 +153,16 @@ def _stable_thread_id(project: str, stem: str) -> str:
     return f"th_{h}"
 
 
+def _tmux_thread_id(tmux_key: str) -> str:
+    """Stable thread id for a tmux group/session key.
+
+    Independent of project so that the SAME tmux group/handoff-chain coalesces to
+    one thread no matter how the per-session file-derived project is inferred (a
+    grouped chain is, by construction, one piece of work)."""
+    h = hashlib.sha1(f"tmux\x00{tmux_key}".encode("utf-8")).hexdigest()[:16]
+    return f"th_{h}"
+
+
 # ---------------------------------------------------------------- the stitcher
 class ThreadStitcher:
     """Implements :class:`contract.ThreadStitcher`.
@@ -301,6 +311,10 @@ class ThreadStitcher:
         s.project = project  # reflect the file-derived project on the session/snapshot
         rec["name"] = s.name
         rec["stem"] = self._canon_stem(name_stem(s.name)) if s.name else ""
+        # tmux group/session thread-key (set transiently on the Session by the
+        # watcher from TmuxSource.thread_key). It is an EXACT, high-priority stitch
+        # signal — see _resolve_thread_for. Robust if tmux is absent (None).
+        rec["tmux_key"] = getattr(s, "tmux_key", None) or None
         if rec.get("first_ts") is None:
             rec["first_ts"] = s.started_at
         if rec.get("last_ts") is None:
@@ -308,6 +322,10 @@ class ThreadStitcher:
 
         thread_id = self._resolve_thread_for(s.id, project, rec)
         th = self._ensure_thread(thread_id, project, rec)
+        # Record stitch evidence AFTER the thread exists. _resolve_thread_for can
+        # name a brand-new thread id (e.g. the tmux-key thread) that didn't exist
+        # when it ran, so its in-place _merge_evidence was a no-op; merge here.
+        self._merge_evidence(thread_id, rec.pop("_evidence", []))
         self._attach(s.id, thread_id)
         self._reorder_and_lead(thread_id)
         return self._threads[thread_id]
@@ -323,7 +341,9 @@ class ThreadStitcher:
 
         # 2) Handoff-doc lineage (AUTHORITATIVE, typo-immune): if this session is
         #    a writer or reader of a handoff doc shared with another session that
-        #    already has a thread, join it.
+        #    already has a thread, join it. This OUTRANKS tmux on purpose: a handoff
+        #    routinely spawns a NEW tmux session (different group), and the lineage
+        #    must still merge the two across that tmux boundary.
         partner = self._handoff_partner(session_id)
         if partner is not None:
             tid = self._assign_map.get(partner)
@@ -331,7 +351,18 @@ class ThreadStitcher:
                 candidate = tid
                 evidence.append("handoff-doc")
 
-        # 3) Fuzzy name-stem within the SAME project.
+        # 3) tmux group / thread_key (NEW, EXACT): the tmux group IS the work /
+        #    handoff chain. If this session carries a tmux_key, its thread id is a
+        #    stable hash of that key, so every session sharing the key coalesces to
+        #    the same thread deterministically. Higher priority than the fuzzy
+        #    name-stem / time signals; lower than handoff lineage above (which may
+        #    legitimately cross tmux groups).
+        tmux_key = rec.get("tmux_key")
+        if candidate is None and tmux_key:
+            candidate = _tmux_thread_id(tmux_key)
+            evidence.append("tmux")
+
+        # 4) Fuzzy name-stem within the SAME project.
         stem = rec.get("stem") or ""
         if candidate is None and stem:
             tid = self._best_stem_thread(project, stem)
@@ -339,7 +370,7 @@ class ThreadStitcher:
                 candidate = tid
                 evidence.append("name-stem")
 
-        # 4) Time-contiguity within the SAME project.
+        # 5) Time-contiguity within the SAME project.
         if candidate is None:
             tid = self._time_contiguous_thread(session_id, project, rec)
             if tid is not None:
@@ -347,7 +378,11 @@ class ThreadStitcher:
                 evidence.append("time")
 
         if candidate is not None:
+            # Merge evidence in-place for already-existing threads, and also stash
+            # it on rec so assign() can merge once the thread is ensured (covers a
+            # brand-new thread id, e.g. the tmux-key thread, that doesn't exist yet).
             self._merge_evidence(candidate, evidence)
+            rec["_evidence"] = evidence
             return candidate
 
         # No stitch -> own thread, id stable on (project, stem) so the same work
@@ -424,7 +459,10 @@ class ThreadStitcher:
     def _ensure_thread(self, thread_id: str, project: str, rec: dict) -> contract.Thread:
         th = self._threads.get(thread_id)
         if th is None:
-            title = rec.get("stem") or rec.get("name") or project or "thread"
+            # Prefer the tmux group/session key for the title — it's a clean, human
+            # name for the work ("comms") vs. a fuzzy stem.
+            title = (rec.get("tmux_key") or rec.get("stem")
+                     or rec.get("name") or project or "thread")
             th = contract.Thread(
                 id=thread_id, title=title, project=project,
                 session_ids=[], created_at=rec.get("first_ts") or time.time(),

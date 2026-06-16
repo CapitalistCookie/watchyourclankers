@@ -1,0 +1,508 @@
+/* watchyourclankers — mosaic.css  (W3 mosaic + menus + mobile)
+ * Dynamic tiling grid, tile chrome + controls, command palette, settings panel,
+ * and the <820px mobile single-pane swipe layout. Reuses the palette + tokens
+ * from styles.css (do NOT duplicate :root there — only mosaic-local additions
+ * live here). Tabular nums on numbers; system mono for code-ish bits. */
+
+:root {
+  /* mosaic-local knobs (overridable per accent via [data-accent] below) */
+  --mos-gap: 1px;
+  --tile-radius: 0px;
+  --tile-chrome-h: 30px;
+  --fanout-h: 26px;
+  --z-rail: 30;
+  --z-fab: 60;
+  --z-palette: 90;
+  --z-toast: 100;
+}
+
+/* accent themes (settings → theme accent). Default = cyan (styles.css). */
+[data-accent="purple"] { --accent: var(--purple); }
+[data-accent="green"]  { --accent: var(--busy); }
+[data-accent="amber"]  { --accent: var(--idle); }
+[data-accent="cyan"]   { --accent: var(--cyan); }
+
+/* ============================================================ mosaic root */
+.mosaic {
+  flex: 1 1 auto; min-height: 0; min-width: 0;
+  display: flex; flex-direction: column;
+  position: relative;
+  background: var(--border);
+}
+
+/* a thin control strip above the grid (layout buttons + mode + more-rail toggle) */
+.mos-bar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 12px;
+  height: 34px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+.mos-bar .mos-bar-spacer { flex: 1 1 auto; }
+.mos-seg {
+  display: inline-flex; align-items: center;
+  border: 1px solid var(--border-2); border-radius: 6px; overflow: hidden;
+}
+.mos-seg button {
+  appearance: none; border: 0; background: var(--bg-2); color: var(--fg-dim);
+  font-family: var(--mono); font-size: 11px; padding: 3px 9px; cursor: pointer;
+  border-right: 1px solid var(--border-2);
+}
+.mos-seg button:last-child { border-right: 0; }
+.mos-seg button:hover { background: var(--bg-3); color: var(--fg); }
+.mos-seg button[aria-pressed="true"] { background: var(--bg-3); color: var(--accent); }
+.mos-bar .mos-mode {
+  font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.mos-bar .mos-mode b { color: var(--accent); font-weight: 600; }
+.mos-iconbtn {
+  appearance: none; border: 1px solid var(--border-2); background: var(--bg-2);
+  color: var(--fg-dim); border-radius: 6px; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; padding: 3px 8px; line-height: 1;
+}
+.mos-iconbtn:hover { background: var(--bg-3); color: var(--fg); }
+.mos-iconbtn[aria-pressed="true"] { color: var(--accent); border-color: var(--cyan-dim); }
+
+/* the grid + the overflow rail sit side by side */
+.mos-stage {
+  flex: 1 1 auto; min-height: 0; min-width: 0;
+  display: flex; gap: var(--mos-gap);
+  background: var(--border);
+}
+
+/* ============================================================ the grid */
+.mos-grid {
+  flex: 1 1 auto; min-height: 0; min-width: 0;
+  display: grid;
+  gap: var(--mos-gap);
+  background: var(--border);
+}
+/* layouts: data-layout drives the track template. Auto-fit fallback keeps it
+   sane if tile count != layout slots. */
+.mos-grid[data-layout="1"] { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.mos-grid[data-layout="2"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
+.mos-grid[data-layout="4"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.mos-grid[data-layout="6"] { grid-template-columns: repeat(3, 1fr); grid-template-rows: 1fr 1fr; }
+
+/* density: compact shrinks chrome + gap */
+.mosaic[data-density="compact"] { --tile-chrome-h: 24px; --fanout-h: 22px; --mos-gap: 1px; }
+.mosaic[data-density="cozy"]    { --tile-chrome-h: 30px; }
+.mosaic[data-density="roomy"]   { --tile-chrome-h: 36px; --mos-gap: 3px; }
+
+/* a maximized tile takes the whole grid; siblings hide */
+.mos-grid.has-max { grid-template-columns: 1fr !important; grid-template-rows: 1fr !important; }
+.mos-grid.has-max > .mos-tile:not(.is-max) { display: none; }
+
+/* ============================================================ tile */
+.mos-tile {
+  position: relative;
+  min-height: 0; min-width: 0;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+  border: 1px solid transparent;
+  border-radius: var(--tile-radius);
+  overflow: hidden;
+}
+.mos-tile.is-focused { border-color: var(--cyan-dim); box-shadow: inset 0 0 0 1px var(--cyan-dim); }
+.mos-tile.is-pinned  { border-color: var(--purple-dim); }
+.mos-tile.is-flagged { border-color: var(--idle); }
+.mos-tile.is-frozen  { opacity: .82; }
+.mos-tile.is-frozen .mos-tile-pane::after {
+  content: "FROZEN"; position: absolute; top: 6px; right: 8px;
+  font-family: var(--mono); font-size: 9px; letter-spacing: 1px;
+  color: var(--idle); border: 1px solid var(--idle); border-radius: 3px;
+  padding: 1px 5px; background: rgba(0,0,0,.4); z-index: 5;
+}
+
+/* tile chrome (header bar) */
+.mos-tile-chrome {
+  flex: 0 0 auto; height: var(--tile-chrome-h);
+  display: flex; align-items: center; gap: 7px;
+  padding: 0 6px 0 9px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+.mos-tile-chrome .t-dot {
+  flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--ended);
+}
+.mos-tile-chrome .t-dot.busy { background: var(--busy); box-shadow: 0 0 6px rgba(78,227,122,.6); }
+.mos-tile-chrome .t-dot.idle { background: var(--idle); }
+.mos-tile-chrome .t-dot.ended { background: var(--ended); }
+.mos-tile-chrome .t-title {
+  font-weight: 600; font-size: 12px; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 40%;
+}
+.mos-tile-chrome .t-sub {
+  font-family: var(--mono); font-size: 10px; color: var(--fg-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 1 1 auto; min-width: 0;
+}
+.mos-tile-chrome .t-sub .t-chain { color: var(--purple); }
+.mos-tile-chrome .t-spacer { flex: 1 1 auto; }
+.mos-tile-ctrls { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; }
+.mos-ctrl {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  color: var(--fg-faint); font-size: 12px; line-height: 1;
+  width: 22px; height: 22px; border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--mono);
+}
+.mos-ctrl:hover { background: var(--bg-3); color: var(--fg); }
+.mos-ctrl.on { color: var(--accent); }
+.mos-ctrl.pin.on { color: var(--purple); }
+.mos-ctrl.flag.on { color: var(--idle); }
+.mos-ctrl.freeze.on { color: var(--idle); }
+
+/* the IDE-vs-raw toggle: a 2-state pill */
+.mos-viewtoggle {
+  display: inline-flex; border: 1px solid var(--border-2); border-radius: 5px;
+  overflow: hidden; margin-right: 2px;
+}
+.mos-viewtoggle button {
+  appearance: none; border: 0; background: var(--bg-2); color: var(--fg-faint);
+  font-family: var(--mono); font-size: 9px; padding: 2px 6px; cursor: pointer;
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.mos-viewtoggle button[aria-pressed="true"] { background: var(--bg-3); color: var(--accent); }
+
+/* the pane area where ide.js (or the fallback) mounts */
+.mos-tile-body { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.mos-tile-pane { position: relative; flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; }
+.mos-tile-pane > * { flex: 1 1 auto; min-width: 0; min-height: 0; }
+
+/* raw-screen mirror surface */
+.mos-screen {
+  flex: 1 1 auto; margin: 0; min-height: 0;
+  background: #070a10; color: #c4ccdc;
+  font-family: var(--mono); font-size: 11px; line-height: 1.32;
+  white-space: pre; overflow: auto; padding: 8px 10px;
+  tab-size: 4;
+}
+.mos-screen.waiting { color: var(--fg-faint); white-space: normal; display: flex; align-items: center; justify-content: center; }
+
+/* ---- lightweight fallback tile (no ide.js available) ---- */
+.mos-fallback {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px;
+  padding: 12px; overflow: auto;
+}
+.mos-fallback .fb-file {
+  font-family: var(--mono); font-size: 12px; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mos-fallback .fb-file .fb-surface { color: var(--purple); text-transform: uppercase; margin-right: 6px; }
+.mos-fallback .fb-acts { display: flex; flex-direction: column; gap: 2px; }
+.mos-fallback .fb-act {
+  font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+  display: flex; gap: 7px; align-items: baseline;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mos-fallback .fb-act .fb-ts { color: var(--fg-faint); }
+.mos-fallback .fb-act .fb-tool { color: var(--cyan); }
+.mos-fallback .fb-busy { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-faint);
+  font-family: var(--mono); font-size: 10px; }
+.mos-fallback .fb-busy .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--busy);
+  animation: pulse 2s infinite; }
+
+/* empty tile (no thread bound) */
+.mos-tile-empty {
+  flex: 1 1 auto; display: flex; align-items: center; justify-content: center;
+  color: var(--fg-faint); font-family: var(--mono); font-size: 11px; padding: 16px; text-align: center;
+}
+
+/* ============================================================ fan-out strip */
+.mos-fanout {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 4px;
+  min-height: var(--fanout-h);
+  padding: 2px 8px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto; overflow-y: hidden;
+}
+.mos-fanout.collapsed { display: none; }
+.mos-fanout .fo-label {
+  font-family: var(--mono); font-size: 9px; color: var(--fg-faint);
+  text-transform: uppercase; letter-spacing: .5px; flex: 0 0 auto; margin-right: 4px;
+  cursor: pointer;
+}
+.mos-fanout .fo-label b { color: var(--k-task); }
+.mos-subtile {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--bg-1); border: 1px solid var(--border-2);
+  font-family: var(--mono); font-size: 10px; color: var(--fg-dim);
+  cursor: default; white-space: nowrap;
+}
+.mos-subtile .sa-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--k-task);
+  animation: pulse 2s infinite; }
+.mos-subtile.done { opacity: .5; }
+.mos-subtile.done .sa-dot { background: var(--ended); animation: none; }
+.mos-subtile .sa-id { color: var(--fg); }
+.mos-subtile .sa-act { color: var(--fg-faint); max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ============================================================ overflow 'more' rail */
+.mos-rail {
+  flex: 0 0 auto; width: 188px; max-width: 40vw;
+  display: flex; flex-direction: column;
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.mos-rail.hidden { display: none; }
+.mos-rail-hdr {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .6px;
+  color: var(--fg-dim); border-bottom: 1px solid var(--border);
+}
+.mos-rail-hdr .accent { color: var(--accent); }
+.mos-rail-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.mos-rail-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.mos-rail-item:hover { background: var(--bg-2); }
+.mos-rail-item .r-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--ended); }
+.mos-rail-item .r-dot.busy { background: var(--busy); box-shadow: 0 0 5px rgba(78,227,122,.55); }
+.mos-rail-item .r-dot.idle { background: var(--idle); }
+.mos-rail-item .r-name { font-weight: 600; font-size: 12px; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mos-rail-item .r-meta { margin-left: auto; font-family: var(--mono); font-size: 9px; color: var(--fg-faint);
+  white-space: nowrap; }
+
+/* ============================================================ command palette (⌘K) */
+.mos-palette-scrim {
+  position: fixed; inset: 0; z-index: var(--z-palette);
+  background: rgba(4,6,11,.55);
+  backdrop-filter: blur(2px);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 12vh;
+}
+.mos-palette-scrim[hidden] { display: none; }
+.mos-palette {
+  width: min(620px, 92vw);
+  background: var(--bg-1);
+  border: 1px solid var(--border-2);
+  border-radius: 12px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  max-height: 64vh;
+}
+.mos-palette-input {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 16px; border-bottom: 1px solid var(--border);
+}
+.mos-palette-input .pi-glyph { color: var(--accent); font-family: var(--mono); font-size: 14px; }
+.mos-palette-input input {
+  flex: 1 1 auto; background: transparent; border: 0; outline: none;
+  color: var(--fg); font-family: var(--sans); font-size: 15px;
+}
+.mos-palette-input input::placeholder { color: var(--fg-faint); }
+.mos-palette-input .pi-hint { font-family: var(--mono); font-size: 10px; color: var(--fg-faint); }
+.mos-palette-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px; }
+.mos-palette-group {
+  font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: .7px;
+  color: var(--fg-faint); padding: 8px 10px 4px;
+}
+.mos-cmd {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 7px; cursor: pointer;
+}
+.mos-cmd .pc-icon { flex: 0 0 auto; width: 18px; text-align: center; color: var(--fg-dim); font-family: var(--mono); }
+.mos-cmd .pc-label { flex: 1 1 auto; color: var(--fg); font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mos-cmd .pc-label .pc-hl { color: var(--accent); }
+.mos-cmd .pc-sub { color: var(--fg-faint); font-family: var(--mono); font-size: 10px; }
+.mos-cmd .pc-key { font-family: var(--mono); font-size: 10px; color: var(--fg-faint);
+  border: 1px solid var(--border-2); border-radius: 4px; padding: 1px 6px; }
+.mos-cmd.active { background: var(--bg-3); }
+.mos-cmd.active .pc-icon { color: var(--accent); }
+.mos-palette-empty { padding: 22px; text-align: center; color: var(--fg-faint);
+  font-family: var(--mono); font-size: 12px; }
+
+/* ============================================================ settings panel */
+.mos-settings-scrim {
+  position: fixed; inset: 0; z-index: var(--z-palette);
+  background: rgba(4,6,11,.55); backdrop-filter: blur(2px);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 8vh;
+}
+.mos-settings-scrim[hidden] { display: none; }
+.mos-settings {
+  width: min(440px, 94vw);
+  background: var(--bg-1); border: 1px solid var(--border-2);
+  border-radius: 12px; box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  display: flex; flex-direction: column; max-height: 80vh; overflow: hidden;
+}
+.mos-settings-hdr {
+  display: flex; align-items: center; padding: 13px 16px; border-bottom: 1px solid var(--border);
+  font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--fg-dim);
+}
+.mos-settings-hdr .accent { color: var(--accent); }
+.mos-settings-hdr .s-close { margin-left: auto; }
+.mos-settings-body { flex: 1 1 auto; overflow-y: auto; padding: 8px 16px 16px; }
+.mos-field {
+  display: flex; align-items: center; gap: 10px; padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.mos-field:last-child { border-bottom: 0; }
+.mos-field .f-label { flex: 1 1 auto; }
+.mos-field .f-label b { display: block; color: var(--fg); font-size: 13px; }
+.mos-field .f-label small { color: var(--fg-faint); font-size: 11px; }
+.mos-field select, .mos-field .seg {
+  flex: 0 0 auto; background: var(--bg-2); color: var(--fg);
+  border: 1px solid var(--border-2); border-radius: 6px; padding: 4px 8px;
+  font-family: var(--mono); font-size: 12px;
+}
+.mos-field .seg { display: inline-flex; padding: 0; overflow: hidden; }
+.mos-field .seg button {
+  appearance: none; border: 0; border-right: 1px solid var(--border-2); background: transparent;
+  color: var(--fg-dim); font-family: var(--mono); font-size: 11px; padding: 4px 9px; cursor: pointer;
+}
+.mos-field .seg button:last-child { border-right: 0; }
+.mos-field .seg button[aria-pressed="true"] { background: var(--bg-3); color: var(--accent); }
+.mos-swatch {
+  width: 18px; height: 18px; border-radius: 50%; border: 2px solid transparent; cursor: pointer;
+  display: inline-block; margin-left: 4px;
+}
+.mos-swatch[aria-pressed="true"] { border-color: var(--fg); }
+/* toggle switch */
+.mos-toggle { position: relative; width: 38px; height: 20px; flex: 0 0 auto; cursor: pointer; }
+.mos-toggle input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.mos-toggle .track { position: absolute; inset: 0; border-radius: 999px; background: var(--bg-3);
+  border: 1px solid var(--border-2); transition: background .15s; }
+.mos-toggle .knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--fg-dim); transition: transform .15s, background .15s; }
+.mos-toggle input:checked + .track { background: var(--cyan-dim); }
+.mos-toggle input:checked + .track + .knob { transform: translateX(18px); background: var(--accent); }
+.mos-settings-foot { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+.mos-btn {
+  appearance: none; border: 1px solid var(--border-2); background: var(--bg-2); color: var(--fg);
+  border-radius: 7px; padding: 6px 12px; font-size: 12px; cursor: pointer; font-family: var(--sans);
+}
+.mos-btn:hover { background: var(--bg-3); }
+.mos-btn.danger { color: var(--error); border-color: var(--error); }
+
+/* redaction indicator chip */
+.mos-redaction {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 10px; color: var(--fg-faint);
+  padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border-2); background: var(--bg-2);
+}
+.mos-redaction .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); }
+.mos-redaction.on { color: var(--busy); border-color: var(--cyan-dim); }
+.mos-redaction.on .dot { background: var(--busy); }
+.mos-redaction.off { color: var(--error); border-color: var(--error); }
+.mos-redaction.off .dot { background: var(--error); }
+.mos-redaction.hidden { display: none; }
+
+/* ============================================================ toast (help/ack) */
+.mos-toast {
+  position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+  z-index: var(--z-toast);
+  background: var(--bg-3); border: 1px solid var(--border-2); color: var(--fg);
+  font-family: var(--mono); font-size: 12px; padding: 8px 14px; border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.5); pointer-events: none;
+  opacity: 0; transition: opacity .18s;
+}
+.mos-toast.show { opacity: 1; }
+
+/* help overlay (keybinds) reuses the palette scrim look */
+.mos-help-scrim {
+  position: fixed; inset: 0; z-index: var(--z-palette);
+  background: rgba(4,6,11,.6); display: flex; align-items: center; justify-content: center;
+}
+.mos-help-scrim[hidden] { display: none; }
+.mos-help {
+  width: min(480px, 92vw); background: var(--bg-1); border: 1px solid var(--border-2);
+  border-radius: 12px; padding: 18px 22px; box-shadow: 0 24px 80px rgba(0,0,0,.6);
+}
+.mos-help h3 { margin: 0 0 12px; font-family: var(--mono); font-size: 13px; color: var(--accent);
+  text-transform: uppercase; letter-spacing: .6px; }
+.mos-help dl { display: grid; grid-template-columns: auto 1fr; gap: 7px 14px; margin: 0; }
+.mos-help dt { font-family: var(--mono); font-size: 11px; color: var(--fg);
+  border: 1px solid var(--border-2); border-radius: 4px; padding: 1px 7px; justify-self: start; }
+.mos-help dd { margin: 0; font-size: 12px; color: var(--fg-dim); align-self: center; }
+
+/* ============================================================ MOBILE (<820px) */
+/* Single focused tile + prev/next thread switcher + floating action bar (FAB).
+   The grid hosts ONE tile; the more-rail + mos-bar fold into mobile chrome. */
+.mosaic .mos-mobile-nav { display: none; }
+
+@media (max-width: 820px) {
+  .mos-bar { display: none; }            /* desktop control strip hidden on mobile */
+  .mos-rail { display: none !important; }  /* no rail; thread switch is swipe/prev-next */
+  .mos-stage { flex-direction: column; }
+
+  .mos-grid,
+  .mos-grid[data-layout] { grid-template-columns: 1fr !important; grid-template-rows: 1fr !important; }
+  /* only the focused tile shows on mobile; others are hidden */
+  .mos-grid > .mos-tile:not(.is-mobile-active) { display: none; }
+
+  /* top mobile nav: prev / thread label+pager / next */
+  .mosaic .mos-mobile-nav {
+    display: flex; align-items: center; gap: 8px;
+    flex: 0 0 auto; height: 42px; padding: 0 10px;
+    background: var(--bg-1); border-bottom: 1px solid var(--border); user-select: none;
+  }
+  .mos-mobile-nav .mn-arrow {
+    appearance: none; border: 1px solid var(--border-2); background: var(--bg-2); color: var(--fg);
+    width: 38px; height: 30px; border-radius: 8px; font-size: 16px; cursor: pointer; flex: 0 0 auto;
+  }
+  .mos-mobile-nav .mn-arrow:active { background: var(--bg-3); }
+  .mos-mobile-nav .mn-label {
+    flex: 1 1 auto; text-align: center; min-width: 0;
+  }
+  .mos-mobile-nav .mn-label .mn-title {
+    font-weight: 600; font-size: 13px; color: var(--fg);
+    display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mos-mobile-nav .mn-label .mn-pager {
+    font-family: var(--mono); font-size: 10px; color: var(--fg-faint);
+  }
+  .mos-mobile-nav .mn-label .mn-pager .mn-dot { color: var(--accent); }
+
+  /* the tile chrome controls overflow → keep only essentials inline on mobile */
+  .mos-tile-chrome .mos-tile-ctrls .mos-ctrl.collapse,
+  .mos-tile-chrome .mos-tile-ctrls .mos-ctrl.popout { display: none; }
+
+  /* floating action bar (settings / pin / freeze / pop-out / raw-screen) */
+  .mosaic .mos-fab {
+    display: flex; position: fixed; right: 14px; bottom: 16px; z-index: var(--z-fab);
+    flex-direction: column; gap: 8px;
+  }
+  .mos-fab .fab-btn {
+    width: 46px; height: 46px; border-radius: 50%;
+    background: var(--bg-2); border: 1px solid var(--border-2); color: var(--fg);
+    font-size: 18px; display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 6px 22px rgba(0,0,0,.5); cursor: pointer;
+  }
+  .mos-fab .fab-btn:active { background: var(--bg-3); }
+  .mos-fab .fab-btn.on { color: var(--accent); border-color: var(--cyan-dim); }
+  .mos-fab .fab-btn.primary { background: var(--accent); color: #07111a; border-color: var(--accent); }
+
+  /* swipe affordance: a subtle edge hint shown during a drag */
+  .mos-grid.swiping > .mos-tile.is-mobile-active { transition: none; }
+
+  /* palette + settings go near full-screen on phones */
+  .mos-palette { width: 94vw; max-height: 72vh; }
+  .mos-settings { width: 94vw; }
+}
+
+/* the FAB never shows on desktop */
+.mosaic .mos-fab { display: none; }
+
+/* reduced motion: kill the pulse/flash animations */
+@media (prefers-reduced-motion: reduce) {
+  .mos-tile .t-dot.busy, .mos-subtile .sa-dot, .mos-fallback .fb-busy .dot,
+  .mos-rail-item .r-dot.busy { animation: none !important; }
+  .mos-toast { transition: none; }
+}

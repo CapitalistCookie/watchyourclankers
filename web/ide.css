@@ -1,0 +1,389 @@
+/* watchyourclankers — ide.css  (W2 IDE-spectator pane)
+ * Read-only IDE watched over Claude's shoulder: file tree + tabbed CodeMirror
+ * editor + live terminal + status line, plus a raw tmux-screen mirror toggle.
+ *
+ * Reuses the palette custom-properties from styles.css (do NOT edit that file).
+ * Dark, IDE-like. All numbers tabular. CodeMirror's own theme handles editor
+ * internals; we only frame it. */
+
+/* ============================================================ layout shell */
+.ide {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  /* tree | (editor over terminal); status line spans the bottom */
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  grid-template-rows: 1fr minmax(120px, 34%) auto;
+  grid-template-areas:
+    "tree   editor"
+    "tree   terminal"
+    "status status";
+  gap: 1px;
+  background: var(--border);
+  position: relative;
+}
+
+.ide-pane {
+  background: var(--bg);
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ide-tree     { grid-area: tree; background: var(--bg-1); }
+.ide-editor   { grid-area: editor; }
+.ide-terminal { grid-area: terminal; background: #070a10; }
+.ide-status   { grid-area: status; }
+
+/* a shared little section header (mirrors .pane-hdr idiom) */
+.ide-hdr {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px;
+  font-family: var(--mono); font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  color: var(--fg-dim);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+.ide-hdr .accent { color: var(--cyan); }
+.ide-hdr .count  { color: var(--fg-faint); margin-left: auto; font-size: 10px; }
+.ide-hdr .icon   { color: var(--fg-faint); }
+
+.ide-body {
+  flex: 1 1 auto; min-height: 0;
+  overflow: auto;
+}
+.ide-body::-webkit-scrollbar { width: 9px; height: 9px; }
+.ide-body::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 5px; }
+.ide-body::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================ file tree */
+.tree-list { padding: 4px 0 10px; }
+
+.tree-node {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2.5px 8px 2.5px 0;
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  cursor: default;
+  border-left: 2px solid transparent;
+  line-height: 1.5;
+}
+.tree-node.file { cursor: pointer; }
+.tree-node.file:hover { background: var(--bg-2); color: var(--fg); }
+.tree-node.dir { color: var(--fg-faint); user-select: none; }
+.tree-node.dir:hover { background: var(--bg-2); }
+
+/* the open/current file */
+.tree-node.current {
+  background: var(--bg-3);
+  color: var(--fg);
+  border-left-color: var(--cyan);
+}
+.tree-node.current .tw-name { color: var(--cyan); }
+
+.tw-twist {
+  flex: 0 0 auto; width: 12px; text-align: center;
+  color: var(--fg-faint); font-size: 9px;
+  transition: transform .12s ease;
+}
+.tree-node.dir.collapsed .tw-twist { transform: rotate(-90deg); }
+.tw-icon { flex: 0 0 auto; width: 13px; text-align: center; opacity: .8; }
+.tw-name { overflow: hidden; text-overflow: ellipsis; }
+
+/* a small dot marking a freshly-touched file */
+.tw-dot {
+  flex: 0 0 auto;
+  width: 6px; height: 6px; border-radius: 50%;
+  margin-left: auto;
+  background: var(--purple);
+  box-shadow: 0 0 5px rgba(184,136,255,.6);
+  opacity: 0;
+  transition: opacity .25s ease;
+}
+.tree-node.touched .tw-dot { opacity: 1; }
+.tree-node.touched.fade .tw-dot { opacity: .35; box-shadow: none; }
+
+/* ============================================================ tab bar */
+.tabbar {
+  flex: 0 0 auto;
+  display: flex; align-items: stretch;
+  height: 30px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto; overflow-y: hidden;
+  user-select: none;
+}
+.tabbar::-webkit-scrollbar { height: 0; }
+
+.tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 0 10px 0 12px;
+  max-width: 220px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-top: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.tab:hover { background: var(--bg-2); color: var(--fg); }
+.tab.active {
+  background: var(--bg);
+  color: var(--fg);
+  border-top-color: var(--cyan);
+}
+.tab.active .tab-name { color: var(--fg); }
+.tab .tab-icon { opacity: .75; font-size: 10px; }
+.tab .tab-name { overflow: hidden; text-overflow: ellipsis; }
+.tab .tab-dir  { color: var(--fg-faint); font-size: 9.5px; }
+/* a tab that just auto-switched flashes its top border */
+.tab.flash { animation: tabflash 1s ease-out; }
+@keyframes tabflash {
+  0%   { border-top-color: var(--purple); background: rgba(184,136,255,.10); }
+  100% { border-top-color: var(--cyan); background: var(--bg); }
+}
+/* the pin glyph: shown when the operator manually pinned a tab (auto-follow paused) */
+.tab .tab-pin { color: var(--purple); font-size: 9px; opacity: 0; }
+.tab.pinned .tab-pin { opacity: 1; }
+.tab .tab-close {
+  color: var(--fg-faint); font-size: 13px; line-height: 1;
+  margin-left: 2px; padding: 0 2px; border-radius: 3px;
+}
+.tab .tab-close:hover { color: var(--error); background: var(--bg-3); }
+
+/* ============================================================ editor surface */
+.editor-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  background: var(--bg);
+  overflow: hidden;
+}
+/* CodeMirror fills the wrap; it ships its own (one-dark) theme. */
+.editor-wrap .cm-editor { height: 100%; font-size: 12.5px; }
+.editor-wrap .cm-scroller {
+  font-family: var(--mono);
+  scrollbar-width: thin;
+}
+.editor-wrap .cm-scroller::-webkit-scrollbar { width: 11px; height: 11px; }
+.editor-wrap .cm-scroller::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 6px; }
+/* flash the changed line range when Claude edits the open file */
+.editor-wrap .cm-line.wyc-hunk-flash { animation: hunkflash 1.6s ease-out; }
+@keyframes hunkflash {
+  0%   { background: rgba(184,136,255,.30); }
+  35%  { background: rgba(184,136,255,.20); }
+  100% { background: transparent; }
+}
+/* a thin gutter accent on the focused edit line */
+.editor-wrap .cm-line.wyc-hunk-line { box-shadow: inset 2px 0 0 var(--purple); }
+
+/* fallback (CDN failed): a highlighted <pre> instead of CodeMirror */
+.editor-fallback {
+  position: absolute; inset: 0;
+  margin: 0; padding: 10px 12px;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+  color: #c4ccdc;
+  background: var(--bg);
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+.editor-fallback .ln {
+  display: inline-block; width: 3.2em;
+  color: var(--fg-faint); user-select: none;
+  text-align: right; padding-right: 1.1em;
+}
+.editor-fallback .wyc-hunk-flash { animation: hunkflash 1.6s ease-out; display: block; }
+.editor-fallback-note {
+  position: absolute; top: 6px; right: 10px; z-index: 3;
+  font-family: var(--mono); font-size: 9.5px;
+  color: var(--idle);
+  background: var(--bg-1);
+  border: 1px solid var(--border-2);
+  border-radius: 4px; padding: 2px 7px;
+  opacity: .85;
+}
+
+/* per-file meta strip (redacted / truncated badges + path) */
+.editor-meta {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 12px;
+  font-family: var(--mono); font-size: 10px;
+  color: var(--fg-faint);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap; overflow: hidden;
+}
+.editor-meta .epath { overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.editor-meta .badge {
+  flex: 0 0 auto;
+  font-size: 9px; padding: 1px 6px; border-radius: 3px;
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.editor-meta .badge.redacted  { color: var(--idle);  border: 1px solid var(--idle); }
+.editor-meta .badge.truncated { color: var(--k-task); border: 1px solid var(--k-task); }
+.editor-meta .badge.recon     { color: var(--purple); border: 1px solid var(--purple-dim); }
+
+.editor-empty,
+.terminal-empty {
+  display: flex; align-items: center; justify-content: center;
+  flex: 1 1 auto;
+  padding: 20px; text-align: center;
+  color: var(--fg-faint);
+  font-family: var(--mono); font-size: 12px;
+}
+
+/* ============================================================ terminal */
+.term-feed { padding-bottom: 8px; }
+.ide .term-block { border-bottom: 1px solid var(--border); }
+.ide .term-cmd {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 4px 12px;
+  font-family: var(--mono); font-size: 12px;
+  background: var(--bg-1);
+  position: sticky; top: 0; z-index: 1;
+}
+.ide .term-cmd .prompt { color: var(--busy); font-weight: 700; }
+.ide .term-cmd .cmd { color: var(--fg); white-space: pre-wrap; word-break: break-all; }
+.ide .term-cmd .exit { font-size: 9.5px; padding: 1px 7px; border-radius: 4px; white-space: nowrap; margin-left: auto; }
+.ide .term-cmd .exit.run { color: var(--idle);  border: 1px solid var(--idle); }
+.ide .term-cmd .exit.ok  { color: var(--ok);    border: 1px solid var(--cyan-dim); }
+.ide .term-cmd .exit.bad { color: var(--error); border: 1px solid var(--error); }
+.ide .term-out {
+  margin: 0; padding: 5px 12px 9px;
+  font-family: var(--mono); font-size: 12px; line-height: 1.4;
+  color: #c4ccdc;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ide .term-cmd.flash { animation: tabflash 1s ease-out; }
+
+/* ============================================================ raw tmux screen */
+.ide-screen {
+  position: absolute; inset: 0; z-index: 20;
+  display: none;
+  flex-direction: column;
+  background: #05070c;
+}
+.ide.raw .ide-screen { display: flex; }
+.screen-hdr {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 12px;
+  font-family: var(--mono); font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: .6px;
+  color: var(--fg-dim);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border-2);
+}
+.screen-hdr .accent { color: var(--purple); }
+.screen-hdr .dims { color: var(--fg-faint); margin-left: auto; }
+.screen-body {
+  flex: 1 1 auto; min-height: 0;
+  overflow: auto;
+  display: flex; /* so the <pre> can center when smaller than the pane */
+}
+.screen-pre {
+  margin: auto;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12px; line-height: 1.25;
+  color: #cfd6e6;
+  white-space: pre;
+  letter-spacing: 0;
+  tab-size: 8;
+}
+.screen-pre.waiting { color: var(--fg-faint); margin: auto; }
+
+/* ANSI color spans for the raw screen (16-color SGR -> palette-ish) */
+.an-1 { font-weight: 700; }
+.an-3 { font-style: italic; }
+.an-4 { text-decoration: underline; }
+.an-7 { filter: invert(1); }
+.an-9 { text-decoration: line-through; }
+.fg-0 { color: #2b3245; } .fg-1 { color: #ff6b6b; } .fg-2 { color: #4ee37a; }
+.fg-3 { color: #e8c84a; } .fg-4 { color: #6aa3ff; } .fg-5 { color: #b888ff; }
+.fg-6 { color: #36d6e7; } .fg-7 { color: #d7dceb; }
+.fg-8 { color: #5c6680; } .fg-9 { color: #ff8f8f; } .fg-10 { color: #79f59c; }
+.fg-11 { color: #ffe07a; } .fg-12 { color: #93c0ff; } .fg-13 { color: #d2aaff; }
+.fg-14 { color: #6fe6f3; } .fg-15 { color: #ffffff; }
+.bg-0 { background: #11151f; } .bg-1 { background: #5a1f1f; } .bg-2 { background: #1f4a2c; }
+.bg-3 { background: #4a401f; } .bg-4 { background: #1f3050; } .bg-5 { background: #3a2a55; }
+.bg-6 { background: #1f4a52; } .bg-7 { background: #2a3140; }
+
+/* ============================================================ status line */
+.ide-status {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 12px;
+  height: 26px;
+  padding: 0 12px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--border);
+  font-family: var(--mono); font-size: 10.5px;
+  color: var(--fg-dim);
+  user-select: none;
+  overflow: hidden;
+}
+.st-dot {
+  flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ended);
+}
+.st-dot.busy  { background: var(--busy); box-shadow: 0 0 6px rgba(78,227,122,.6); animation: pulse 2s infinite; }
+.st-dot.idle  { background: var(--idle); }
+.st-dot.ended { background: var(--ended); }
+.st-claude { color: var(--fg); white-space: nowrap; }
+.st-claude .verb { color: var(--purple); text-transform: uppercase; }
+.st-claude .obj  { color: var(--cyan); }
+.st-spacer { flex: 1 1 auto; }
+.st-badge {
+  flex: 0 0 auto;
+  color: var(--fg-faint);
+  border: 1px solid var(--border-2);
+  border-radius: 3px; padding: 1px 7px;
+  white-space: nowrap;
+}
+.st-badge.model { color: var(--fg-dim); }
+.st-badge.tmux  { color: var(--cyan-dim); border-color: var(--cyan-dim); }
+.st-badge.sub   { color: var(--k-task); border-color: var(--k-task); }
+
+/* the raw-screen toggle button (lives in the status line, right side) */
+.st-raw {
+  flex: 0 0 auto;
+  font-family: var(--mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: .5px;
+  color: var(--fg-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+.st-raw:hover { color: var(--fg); border-color: var(--purple-dim); }
+.ide.raw .st-raw {
+  color: var(--purple);
+  border-color: var(--purple);
+  background: rgba(184,136,255,.10);
+}
+.st-raw[hidden] { display: none; }
+
+/* ============================================================ responsive */
+@media (max-width: 820px) {
+  .ide {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr minmax(110px, 30%) auto;
+    grid-template-areas:
+      "tree"
+      "editor"
+      "terminal"
+      "status";
+  }
+  .ide-tree { max-height: 130px; }
+}

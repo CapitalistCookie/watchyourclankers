@@ -141,6 +141,8 @@ class FakeWatcher:
         self._seq = 7
         self._with_buffer = with_buffer
         self.hook_events: list[dict] = []
+        self.watched: list[str] = []      # session_ids passed to watch_screen
+        self.unwatched: list[str] = []    # session_ids passed to unwatch_screen
         # one activity to stream
         self._act = contract.Activity(seq=8, ts=2.0, session_id="s1",
                                      thread_id="th_comms",
@@ -169,6 +171,14 @@ class FakeWatcher:
 
     def ingest_hook(self, payload: dict) -> None:
         self.hook_events.append(payload)
+
+    def watch_screen(self, session_id: str) -> None:
+        # the real watcher starts streaming Screen frames for this pane; the
+        # fake just records the call so the server wiring can be asserted.
+        self.watched.append(session_id)
+
+    def unwatch_screen(self, session_id: str) -> None:
+        self.unwatched.append(session_id)
 
 
 # ── async server helpers (explicit loop — no pytest-asyncio dependency) ───────
@@ -332,6 +342,164 @@ def test_hook_route_rejected_without_token():
         try:
             resp = await client.post("/hook", json={"tool_name": "Edit"})
             assert resp.status == 401
+        finally:
+            await client.close()
+    _run(go())
+
+
+# ── GET /file: redacted, root-jailed, read-only editor peek ──────────────────
+def test_file_returns_redacted_content_under_allowed_root(monkeypatch, tmp_path):
+    """A readable regular file under an allowlisted root is served, with its
+    content run through redact() (a planted secret comes back masked)."""
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "leaky.py"
+    target.write_text(f"x = 1\ntoken = '{_SECRET}'\nprint(x)\n")
+    # allowlist this tmp root only (default is /home/user, not tmp_path)
+    monkeypatch.setenv("WYC_FILE_ROOTS", str(root))
+
+    async def go():
+        client, token = await _make_client(FakeWatcher())
+        try:
+            resp = await client.get(f"/file?path={target}&token={token}")
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["redacted"] is True
+            assert body["truncated"] is False
+            assert body["lines"] == 3
+            # realpath is echoed back
+            assert body["path"] == os.path.realpath(str(target))
+            # the secret is masked but surrounding code survives
+            assert _SECRET not in body["content"]
+            assert "print(x)" in body["content"]
+        finally:
+            await client.close()
+    _run(go())
+
+
+def test_file_outside_roots_is_403(monkeypatch, tmp_path):
+    """A path outside every allowlisted root is refused with 403 (jail) —
+    /etc/passwd must never be served even though it exists + is readable."""
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setenv("WYC_FILE_ROOTS", str(root))  # /etc not in the allowlist
+
+    async def go():
+        client, token = await _make_client(FakeWatcher())
+        try:
+            resp = await client.get(f"/file?path=/etc/passwd&token={token}")
+            assert resp.status == 403
+        finally:
+            await client.close()
+    _run(go())
+
+
+def test_file_missing_is_404(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setenv("WYC_FILE_ROOTS", str(root))
+    missing = root / "nope.py"  # under the root, but does not exist
+
+    async def go():
+        client, token = await _make_client(FakeWatcher())
+        try:
+            resp = await client.get(f"/file?path={missing}&token={token}")
+            assert resp.status == 404
+        finally:
+            await client.close()
+    _run(go())
+
+
+def test_file_rejected_without_token(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "ok.py"
+    target.write_text("y = 2\n")
+    monkeypatch.setenv("WYC_FILE_ROOTS", str(root))
+
+    async def go():
+        client, _ = await _make_client(FakeWatcher())
+        try:
+            resp = await client.get(f"/file?path={target}")  # no token
+            assert resp.status == 401
+        finally:
+            await client.close()
+    _run(go())
+
+
+# ── inbound watch_screen / unwatch_screen -> watcher ─────────────────────────
+def test_ws_watch_screen_calls_watcher():
+    """An inbound watch_screen message must call watcher.watch_screen(session_id)
+    (the watcher then streams Screen frames via subscribe(), forwarded already)."""
+    async def go():
+        watcher = FakeWatcher()
+        client, token = await _make_client(watcher)
+        try:
+            ws = await client.ws_connect(f"/ws?token={token}")
+            await ws.receive_json()  # hello
+            await ws.receive_json()  # snapshot
+            await ws.send_json(contract.msg("watch_screen", session_id="s1"))
+            # scan for the ack
+            acked = False
+            for _ in range(4):
+                m = await asyncio.wait_for(ws.receive_json(), timeout=2)
+                if m["t"] == "watch_screen_ack":
+                    acked = True
+                    assert m["ok"] is True
+                    assert m["session_id"] == "s1"
+                    break
+            assert acked, "no watch_screen_ack received"
+            await ws.close()
+        finally:
+            await client.close()
+        assert watcher.watched == ["s1"], "watcher.watch_screen(session_id) not called"
+    _run(go())
+
+
+def test_ws_unwatch_screen_calls_watcher():
+    async def go():
+        watcher = FakeWatcher()
+        client, token = await _make_client(watcher)
+        try:
+            ws = await client.ws_connect(f"/ws?token={token}")
+            await ws.receive_json()  # hello
+            await ws.receive_json()  # snapshot
+            await ws.send_json(contract.msg("unwatch_screen", session_id="s1"))
+            for _ in range(4):
+                m = await asyncio.wait_for(ws.receive_json(), timeout=2)
+                if m["t"] == "unwatch_screen_ack":
+                    assert m["ok"] is True
+                    break
+            await ws.close()
+        finally:
+            await client.close()
+        assert watcher.unwatched == ["s1"]
+    _run(go())
+
+
+def test_ws_watch_screen_degrades_when_watcher_lacks_method():
+    """If the (parallel-built) watcher has no watch_screen, the server must still
+    ack gracefully (ok:False + note) rather than erroring."""
+    class NoScreenWatcher(FakeWatcher):
+        watch_screen = None  # attribute present but not callable
+
+    async def go():
+        client, token = await _make_client(NoScreenWatcher())
+        try:
+            ws = await client.ws_connect(f"/ws?token={token}")
+            await ws.receive_json()  # hello
+            await ws.receive_json()  # snapshot
+            await ws.send_json(contract.msg("watch_screen", session_id="s1"))
+            acked = False
+            for _ in range(4):
+                m = await asyncio.wait_for(ws.receive_json(), timeout=2)
+                if m["t"] == "watch_screen_ack":
+                    acked = True
+                    assert m["ok"] is False
+                    assert "note" in m
+                    break
+            assert acked
+            await ws.close()
         finally:
             await client.close()
     _run(go())

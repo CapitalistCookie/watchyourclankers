@@ -54,6 +54,21 @@
         "exit_code": {"type": ["integer", "null"]}
       }
     },
+    "Screen": {
+      "type": "object",
+      "description": "A raw rendered tmux pane frame (the literal TUI). Streamed only for panes a client is actively watching. ANSI-bearing, redacted.",
+      "required": ["seq", "ts", "session_id", "thread_id", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "seq": {"type": "integer"},
+        "ts": {"type": "number"},
+        "session_id": {"type": "string"},
+        "thread_id": {"type": "string"},
+        "data": {"type": "string", "description": "rendered pane text (ANSI), redacted"},
+        "cols": {"type": "integer", "default": 0},
+        "rows": {"type": "integer", "default": 0}
+      }
+    },
     "Session": {
       "type": "object",
       "description": "A live (or recently-ended) Claude Code process.",
@@ -72,7 +87,10 @@
         "updated_at": {"type": ["number", "null"]},
         "current_surface": {"$ref": "#/$defs/Kind", "description": "what Claude is doing right now"},
         "current_file": {"type": ["string", "null"]},
-        "subagents": {"type": "array", "items": {"type": "string"}, "description": "active sub-agent ids"}
+        "subagents": {"type": "array", "items": {"type": "string"}, "description": "active sub-agent ids"},
+        "tmux_session": {"type": ["string", "null"]},
+        "tmux_group": {"type": ["string", "null"], "description": "tmux group == work / handoff chain"},
+        "tmux_pane": {"type": ["string", "null"]}
       }
     },
     "Thread": {
@@ -97,9 +115,12 @@
     {"title": "snapshot", "type": "object", "additionalProperties": false, "required": ["t", "v", "seq", "server_ts", "threads", "sessions"], "properties": {"t": {"const": "snapshot"}, "v": {"const": 1}, "seq": {"type": "integer"}, "server_ts": {"type": "number"}, "threads": {"type": "array", "items": {"$ref": "#/$defs/Thread"}}, "sessions": {"type": "array", "items": {"$ref": "#/$defs/Session"}}, "recent": {"type": "array", "items": {"$ref": "#/$defs/Activity"}, "description": "tail of recent activities for warm-start"}}},
     {"title": "activity", "type": "object", "additionalProperties": false, "required": ["t", "v", "activity"], "properties": {"t": {"const": "activity"}, "v": {"const": 1}, "activity": {"$ref": "#/$defs/Activity"}}},
     {"title": "terminal", "type": "object", "additionalProperties": false, "required": ["t", "v", "terminal"], "properties": {"t": {"const": "terminal"}, "v": {"const": 1}, "terminal": {"$ref": "#/$defs/Terminal"}}},
+    {"title": "screen", "type": "object", "additionalProperties": false, "required": ["t", "v", "screen"], "properties": {"t": {"const": "screen"}, "v": {"const": 1}, "screen": {"$ref": "#/$defs/Screen"}}},
     {"title": "session_update", "type": "object", "additionalProperties": false, "required": ["t", "v", "seq", "session"], "properties": {"t": {"const": "session_update"}, "v": {"const": 1}, "seq": {"type": "integer"}, "session": {"$ref": "#/$defs/Session"}}},
     {"title": "thread_update", "type": "object", "additionalProperties": false, "required": ["t", "v", "seq", "thread"], "properties": {"t": {"const": "thread_update"}, "v": {"const": 1}, "seq": {"type": "integer"}, "thread": {"$ref": "#/$defs/Thread"}}},
     {"title": "subscribe", "type": "object", "additionalProperties": false, "required": ["t", "v", "scope"], "properties": {"t": {"const": "subscribe"}, "v": {"const": 1}, "scope": {"type": "string", "description": "'all' | thread:<id> | session:<id>"}}},
+    {"title": "watch_screen", "type": "object", "additionalProperties": false, "required": ["t", "v", "session_id"], "properties": {"t": {"const": "watch_screen"}, "v": {"const": 1}, "session_id": {"type": "string", "description": "start streaming the raw tmux screen for this session's pane"}}},
+    {"title": "unwatch_screen", "type": "object", "additionalProperties": false, "required": ["t", "v", "session_id"], "properties": {"t": {"const": "unwatch_screen"}, "v": {"const": 1}, "session_id": {"type": "string"}}},
     {"title": "resync", "type": "object", "additionalProperties": false, "required": ["t", "v", "since"], "properties": {"t": {"const": "resync"}, "v": {"const": 1}, "since": {"type": "integer", "description": "last seq the client holds; server replies with snapshot if gap"}}},
     {"title": "annotate", "type": "object", "additionalProperties": false, "required": ["t", "v", "action", "target"], "properties": {"t": {"const": "annotate"}, "v": {"const": 1}, "action": {"type": "string", "enum": ["pin", "freeze", "flag", "unpin", "unfreeze", "unflag"]}, "target": {"type": "object", "description": "{session_id|thread_id, file_path?, line?, note?} — STUB in slice 1, write path lands later"}}},
     {"title": "thread_override", "type": "object", "additionalProperties": false, "required": ["t", "v", "op"], "properties": {"t": {"const": "thread_override"}, "v": {"const": 1}, "op": {"type": "string", "enum": ["merge", "split", "alias"]}, "args": {"type": "object", "description": "operator correction of thread stitching; persisted as sticky override + alias"}}}

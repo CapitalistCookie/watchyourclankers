@@ -1,16 +1,42 @@
 // @ts-check
 /**
- * watchyourclankers — app.js  (W1 entry / integration shell)
+ * watchyourclankers — app.js  (entry / integration shell)
  * Bootstraps: resolve token -> create store -> create client -> wire client to
- * store -> mount the active view (debug.js for W1) -> render a connection-status
- * indicator. W2/W3 swap the mounted view (ide.js / mosaic.js) but KEEP this shell
- * pattern and the store API.
+ * store -> expose window.wyc + store.client -> mount the active view -> render a
+ * connection-status indicator.
+ *
+ * VIEW SELECTION: defaults to the W3 mosaic (mosaic.js). A `?view=debug` query
+ * param (or localStorage 'wyc.view' === 'debug') mounts the W1 debug view instead
+ * — a low-level fallback that needs no CDN and shows the raw event stream. Any
+ * other explicit value ('mosaic'/'ide-less'…) maps back to mosaic.
+ *
+ * The client is exposed on BOTH window.wyc.client and store.client BEFORE the
+ * view mounts, because panes (ide.js / mosaic.js + menu.js) resolve the client at
+ * mount time (mosaic constructs its menu with client: getClient()).
  */
 
 import { createStore } from './store.js';
 import { createClient } from './client.js';
 import { resolveToken } from './app-config.js';
+import mountMosaic from './mosaic.js';
 import { mount as mountDebug } from './debug.js';
+
+// Which view to mount: 'debug' (fallback) vs 'mosaic' (default). Honors
+// ?view=debug then localStorage 'wyc.view'.
+function resolveView() {
+  try {
+    if (typeof location !== 'undefined' && location.search) {
+      const v = new URLSearchParams(location.search).get('view');
+      if (v) return v === 'debug' ? 'debug' : 'mosaic';
+    }
+  } catch (_) {}
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('wyc.view') === 'debug') {
+      return 'debug';
+    }
+  } catch (_) {}
+  return 'mosaic';
+}
 
 const STATUS_TEXT = {
   connecting: 'connecting',
@@ -87,14 +113,29 @@ function boot() {
       + (state.resyncs ? ` · ${state.resyncs} resync` : '');
   });
 
-  // wire client -> store (store installs itself as the client's handler bundle)
+  // wire client -> store (store installs itself as the client's handler bundle
+  // AND exposes it as store.client). ide.js resolves the client off store.client.
   store.connectClient(client);
 
-  // mount the active view (W1: debug; W2/W3 replace this line)
-  const view = mountDebug(viewEl, store);
+  // expose for console debugging / future hot-swap. MUST be set BEFORE mounting
+  // the view: mosaic.js (and its menu.js) resolve the client via window.wyc.client
+  // at mount time. `view` is filled in immediately after mounting.
+  /** @type {any} */
+  const wyc = { store, client, view: null };
+  /** @type {any} */ (window).wyc = wyc;
 
-  // expose for console debugging / future hot-swap
-  /** @type {any} */ (window).wyc = { store, client, view };
+  // mount the active view: mosaic (default) with a debug fallback (?view=debug or
+  // localStorage 'wyc.view'='debug').
+  const which = resolveView();
+  let view;
+  try {
+    view = which === 'debug' ? mountDebug(viewEl, store) : mountMosaic(viewEl, store);
+  } catch (e) {
+    console.error(`[app] mounting ${which} view failed; falling back to debug`, e);
+    viewEl.innerHTML = '';
+    try { view = mountDebug(viewEl, store); } catch (e2) { console.error('[app] debug fallback failed too', e2); }
+  }
+  wyc.view = view;
 }
 
 if (typeof document !== 'undefined') {

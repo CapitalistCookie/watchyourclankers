@@ -92,6 +92,24 @@ class Terminal:
 
 
 @dataclass
+class Screen:
+    """A raw rendered tmux pane frame (the literal TUI Claude is in). Streamed
+    only for panes a client is actively watching. ANSI-bearing; redacted. This
+    is the over-the-shoulder 'screen mirror' surface — distinct from the
+    structured Activity/Terminal stream the IDE is built from."""
+    seq: int
+    ts: float
+    session_id: str
+    thread_id: str
+    data: str
+    cols: int = 0
+    rows: int = 0
+
+    def wire(self) -> dict:
+        return {k: v for k, v in asdict(self).items()}
+
+
+@dataclass
 class Session:
     id: str
     thread_id: str
@@ -106,6 +124,9 @@ class Session:
     current_surface: str = KIND_OTHER
     current_file: Optional[str] = None
     subagents: list[str] = field(default_factory=list)
+    tmux_session: Optional[str] = None    # tmux session name (often == the work)
+    tmux_group: Optional[str] = None      # tmux group == work / handoff chain
+    tmux_pane: Optional[str] = None        # e.g. "comms:0.0" for capture-pane
 
     def wire(self) -> dict:
         return asdict(self)
@@ -146,6 +167,9 @@ def activity_msg(a: Activity) -> dict:
 def terminal_msg(term: Terminal) -> dict:
     return msg("terminal", terminal=term.wire())
 
+def screen_msg(scr: Screen) -> dict:
+    return msg("screen", screen=scr.wire())
+
 def session_update(seq: int, s: Session) -> dict:
     return msg("session_update", seq=seq, session=s.wire())
 
@@ -175,6 +199,21 @@ class SessionPoller(Protocol):
     """wyc.sessions — reads SESSIONS_DIR/*.json (the live registry)."""
     def poll(self) -> list[Session]: ...
     """Return the current live/recent sessions. status from registry + mtime."""
+
+
+class TmuxSource(Protocol):
+    """wyc.tmux — enumerate live `claude` panes and stream the rendered screen.
+
+    tmux gives, BETTER than transcripts: liveness, identity (the tmux session
+    name + group == the work + handoff chain), and the live rendered TUI incl.
+    streaming shell output. Do NOT parse the rendered text for structure — that
+    stays the transcript's job. Identity / liveness / screen only."""
+    def panes(self) -> list[dict]: ...
+    """[{pane, pid, tmux_session, tmux_group, command, active, title}] for claude panes."""
+    def identity_for(self, pid: Optional[int]) -> Optional[dict]: ...
+    """{tmux_session, tmux_group, pane} for the pane whose process tree holds pid, else None."""
+    def capture(self, pane: str, history: int = 0) -> str: ...
+    """One rendered snapshot of a pane (ANSI), optionally with `history` scrollback lines."""
 
 
 class TranscriptReader(Protocol):

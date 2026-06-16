@@ -5,8 +5,8 @@
  * (constitution Principle VI) and exponential-backoff reconnect.
  *
  * Wire protocol: contracts/events.schema.json (mirrored in wyc/contract.py).
- *   server -> client : hello, snapshot, activity, terminal, session_update, thread_update
- *   client -> server : subscribe, resync, annotate, thread_override
+ *   server -> client : hello, snapshot, activity, terminal, screen, session_update, thread_update
+ *   client -> server : subscribe, resync, annotate, thread_override, watch_screen, unwatch_screen
  *
  * SEQ LOCATIONS (important — seq lives in different places per message type):
  *   snapshot        -> m.seq            (top-level)
@@ -14,6 +14,7 @@
  *   thread_update   -> m.seq            (top-level)
  *   activity        -> m.activity.seq   (nested)
  *   terminal        -> m.terminal.seq   (nested)
+ *   screen          -> m.screen.seq     (nested)
  *   hello           -> (no seq)
  *
  * GAP RECOVERY: we track lastSeq = highest server seq applied. For any streamed
@@ -25,12 +26,15 @@
  *
  * PUBLIC API:
  *   const client = createClient({ url?, token?, protocolVersion? });
- *   client.connect({ onHello, onSnapshot, onActivity, onTerminal, onSession,
+ *   client.connect({ onHello, onSnapshot, onActivity, onTerminal, onScreen, onSession,
  *                    onThread, onStatus, onGap?, onResync? });   // begins connecting
+ *     onScreen(screen)         fired with a raw tmux pane frame (Screen $def)
  *     onGap({from,to,missed})  fired when a forward seq gap is detected (debug counter)
  *     onResync({since})        fired when a resync request is issued (debug counter)
  *   client.send(obj)              // raw client->server envelope (adds v if absent)
  *   client.subscribe(scope)       // {t:'subscribe', scope}  ('all'|thread:<id>|session:<id>)
+ *   client.watchScreen(sId)       // {t:'watch_screen', session_id}  start raw-screen stream
+ *   client.unwatchScreen(sId)     // {t:'unwatch_screen', session_id} stop it
  *   client.resync()               // force a resync from current lastSeq
  *   client.annotate(action,target)// stub write path (server-side stub in slice 1)
  *   client.threadOverride(op,args)// operator stitch correction
@@ -168,6 +172,9 @@ export function createClient(opts = {}) {
       case 'terminal':
         if (m.terminal) { checkSeq(m.terminal.seq); callHandler('onTerminal', m.terminal); }
         break;
+      case 'screen':
+        if (m.screen) { checkSeq(m.screen.seq); callHandler('onScreen', m.screen); }
+        break;
       case 'session_update':
         checkSeq(m.seq); callHandler('onSession', m.session);
         break;
@@ -220,6 +227,8 @@ export function createClient(opts = {}) {
     close,
     send,
     subscribe: (scope) => send({ t: 'subscribe', scope: scope || 'all' }),
+    watchScreen: (sessionId) => send({ t: 'watch_screen', session_id: sessionId }),
+    unwatchScreen: (sessionId) => send({ t: 'unwatch_screen', session_id: sessionId }),
     resync: () => { resyncInFlight = false; requestResync(); },
     annotate: (action, target) => send({ t: 'annotate', action, target: target || {} }),
     threadOverride: (op, args) => send({ t: 'thread_override', op, args: args || {} }),

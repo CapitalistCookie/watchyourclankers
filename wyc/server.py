@@ -43,6 +43,7 @@ from . import contract
 _WS_HEARTBEAT = 30          # seconds; mirrors clanker's WebSocketResponse heartbeat
 _HOOK_MAX_BYTES = 64 * 1024  # cap an enrichment payload (enrichment only, untrusted size)
 _TOKEN_COOKIE = "wyc_token"
+_FILE_MAX_BYTES = 2 * 1024 * 1024  # /file head cap (~2 MB); larger -> truncated:true
 
 # typed app[] keys (aiohttp's recommended AppKey pattern)
 _K_WATCHER: "web.AppKey[Any]" = web.AppKey("wyc_watcher", object)
@@ -271,6 +272,95 @@ async def handle_hook(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "fed": fed})
 
 
+# ── read-only file peek (the IDE editor pane) ────────────────────────────────
+def _file_roots() -> list[str]:
+    """Allowlist of realpath roots /file may serve under (Principle I/II).
+
+    Default ['/home/user']; override via env WYC_FILE_ROOTS (colon-separated).
+    Each root is itself realpath-resolved so a symlinked root still matches."""
+    raw = os.environ.get("WYC_FILE_ROOTS", "/home/user")
+    roots: list[str] = []
+    for part in raw.split(":"):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            roots.append(os.path.realpath(part))
+        except OSError:
+            continue
+    return roots or [os.path.realpath("/home/user")]
+
+
+def _under_root(real: str, root: str) -> bool:
+    """True iff `real` (a realpath) is the root itself or strictly within it.
+
+    Uses os.path.commonpath on the split components so /home/userX does NOT
+    count as under /home/user (prefix-string matching would wrongly accept it)."""
+    try:
+        return os.path.commonpath([real, root]) == root
+    except ValueError:
+        # different drives / one is relative — never under.
+        return False
+
+
+async def handle_file(request: web.Request) -> web.Response:
+    """GET /file?path=<abs>&token=<t> — serve REDACTED, root-jailed file content
+    for the IDE editor pane. Read-only (Principle I: observing an observed file
+    is allowed; writing is not). Auth enforced by auth_middleware.
+
+    Security jail (Principle II): resolve realpath, serve ONLY a readable regular
+    file whose realpath sits under an allowlisted root (default /home/user, env
+    WYC_FILE_ROOTS overrides). Anything else -> 403 (blocks /etc/shadow, ssh
+    keys, ...). At most ~2 MB is read (head returned + truncated:true if larger).
+    Content passes through wyc.redact.redact() before it leaves the process.
+
+    Returns {path, content, lines, redacted:true, truncated:<bool>}; 404 if the
+    path is missing / not a regular file; 400 if no path given."""
+    raw_path = request.query.get("path")
+    if not raw_path:
+        return web.json_response({"error": "missing path"}, status=400)
+
+    # Resolve the realpath FIRST (follows symlinks) and jail it to a root. We
+    # gate on the realpath, never the raw input, so a symlink can't escape.
+    try:
+        real = os.path.realpath(raw_path)
+    except OSError:
+        return web.json_response({"error": "bad path"}, status=400)
+
+    roots = _file_roots()
+    if not any(_under_root(real, r) for r in roots):
+        # Outside every allowlisted root — refuse (don't reveal existence).
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    if not os.path.isfile(real):  # missing, a dir, a device, a socket, ...
+        return web.json_response({"error": "not found"}, status=404)
+
+    # Read at most _FILE_MAX_BYTES + 1 so we can detect truncation cheaply.
+    try:
+        with open(real, "rb") as fh:
+            blob = fh.read(_FILE_MAX_BYTES + 1)
+    except OSError:
+        # Unreadable (perms, vanished between checks, ...) — treat as not found.
+        return web.json_response({"error": "not found"}, status=404)
+
+    truncated = len(blob) > _FILE_MAX_BYTES
+    if truncated:
+        blob = blob[:_FILE_MAX_BYTES]
+    text = blob.decode("utf-8", "replace")
+
+    from . import redact as _redact  # ensures contract.redact is the real impl
+    content = _redact.redact(text) or ""
+    lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+
+    return web.json_response({
+        "path": real,
+        "content": content,
+        "lines": lines,
+        "redacted": True,
+        "truncated": truncated,
+    })
+
+
 # ── WebSocket: snapshot-then-stream (Principle VI) ───────────────────────────
 async def _send(ws: web.WebSocketResponse, obj: dict) -> bool:
     """Send a JSON envelope; return False if the socket is gone."""
@@ -387,6 +477,31 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
                 persist_override({"op": msg.get("op"), "args": msg.get("args")})
                 await _send(ws, contract.msg("thread_override_ack", ok=True,
                                              op=msg.get("op")))
+            elif t in ("watch_screen", "unwatch_screen"):
+                # Trigger the watcher to start/stop streaming raw tmux Screen
+                # frames for this session's pane. We do NOT push frames here —
+                # toggling the watch makes them flow through watcher.subscribe(),
+                # which the pump task above already forwards. getattr-guarded so
+                # the server still runs if the (parallel-built) watcher lacks the
+                # method yet: degrade by acking with a note.
+                session_id = msg.get("session_id")
+                fn = getattr(watcher, t, None)
+                if callable(fn) and session_id:
+                    try:
+                        res = fn(session_id)
+                        if asyncio.iscoroutine(res):
+                            await res
+                        await _send(ws, contract.msg(t + "_ack", ok=True,
+                                                     session_id=session_id))
+                    except Exception:
+                        # Watcher-side toggle failure must not crash the socket.
+                        await _send(ws, contract.msg(t + "_ack", ok=False,
+                                                     session_id=session_id,
+                                                     note="watcher error"))
+                else:
+                    await _send(ws, contract.msg(
+                        t + "_ack", ok=False, session_id=session_id,
+                        note="screen watching unavailable"))
             # unknown message types are ignored (forward-compat).
     finally:
         pump_task.cancel()
@@ -413,6 +528,7 @@ def build_app(watcher: Any) -> web.Application:
     app.router.add_get("/ws", handle_ws)
     app.router.add_get("/hook", handle_hook)
     app.router.add_post("/hook", handle_hook)
+    app.router.add_get("/file", handle_file)
     app.router.add_get("/", handle_index)
 
     # Static assets from web/ (built by the IDE agent). Only mounted if present;

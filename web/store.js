@@ -12,9 +12,11 @@
  *   // --- wiring (app.js does this once; views never call these) ---
  *   store.connectClient(client)   // hand it the client from client.js; store wires
  *                                 // itself as that client's handlers and owns the socket.
+ *                                 // ALSO exposes it as store.client (views resolve it).
  *   //   OR feed events manually (tests):
  *   store.applyHello(msg) / store.applySnapshot(msg) / store.applyActivity(act)
- *   store.applyTerminal(term) / store.applySession(sess) / store.applyThread(th)
+ *   store.applyTerminal(term) / store.applyScreen(scr)
+ *   store.applySession(sess) / store.applyThread(th)
  *   store.setStatus('connecting'|'live'|'reconnecting'|'closed')
  *
  *   // --- subscription (views) ---
@@ -36,6 +38,8 @@
  *   store.session(sId) / store.thread(tId)   // single lookups, or undefined
  *   store.activity(seq)                 // single Activity by its global seq, or undefined
  *   store.terminalForActivity(sId, refSeq)   // the one TerminalBuf for a bash seq
+ *   store.screenForSession(sId)         // latest Screen frame {seq,data,cols,rows,ts} or null
+ *                                       //   (only sessions a client is actively watching)
  *
  * ============================================================================
  *  STATE SHAPE  (store.getState())  — plain objects, Maps for keyed collections
@@ -56,6 +60,8 @@
  *     activityBySeq: Map<seq, Activity>,          // also capped (RING * sessions-ish)
  *     // per-session terminal buffers, keyed by the bash Activity's seq:
  *     terminals: Map<sessionId, Map<refSeq, TerminalBuf>>,
+ *     // latest raw tmux pane frame per watched session (bounded; newest-wins):
+ *     screens: Map<sessionId, Screen>,            // capped at SCREEN_MAX
  *   }
  *
  *   Thread / Session / Activity = exactly the schema dataclass shapes
@@ -93,6 +99,7 @@
  */
 
 const RING = 200; // per-session bounded activity ring (Principle VI: drop-slow on edits/term)
+const SCREEN_MAX = 64; // max sessions we retain a latest-screen frame for (bounded map)
 
 /** @returns {object} the store */
 export function createStore() {
@@ -109,7 +116,11 @@ export function createStore() {
     activities: new Map(),
     activityBySeq: new Map(),
     terminals: new Map(),
+    screens: new Map(),
   };
+
+  /** @type {any} */
+  let boundClient = null; // the client.js instance, exposed as store.client for views
 
   /** @type {Set<Function>} */
   const subs = new Set();
@@ -252,6 +263,27 @@ export function createStore() {
     notify();
   }
 
+  // Latest raw tmux pane frame per session (newest-wins). We only keep the most
+  // recent frame per session (the TUI is a full-screen mirror — older frames are
+  // superseded), in a bounded map so a long-lived watcher can't grow unbounded.
+  function applyScreen(screen) {
+    if (!screen || typeof screen.session_id !== 'string') return;
+    bumpSeq(screen.seq);
+    const prev = state.screens.get(screen.session_id);
+    // ignore out-of-order/duplicate frames (keep the highest seq)
+    if (prev && typeof prev.seq === 'number' && typeof screen.seq === 'number'
+        && screen.seq < prev.seq) return;
+    // re-insert at the tail (Map keeps insertion order) so eviction drops the
+    // least-recently-updated session.
+    if (prev) state.screens.delete(screen.session_id);
+    state.screens.set(screen.session_id, screen);
+    if (state.screens.size > SCREEN_MAX) {
+      const oldest = state.screens.keys().next().value;
+      if (oldest !== undefined) state.screens.delete(oldest);
+    }
+    notify();
+  }
+
   function applySession(s) {
     if (!s || typeof s.id !== 'string') return;
     state.sessions.set(s.id, s);
@@ -279,11 +311,13 @@ export function createStore() {
   // and gap-recovery; the store just applies typed events + tracks lastSeq.
   // gap detection on the client reads store.getState().lastSeq.
   function connectClient(client) {
+    boundClient = client; // expose for views (store.client); see resolution in ide.js/mosaic.js
     client.connect({
       onHello: applyHello,
       onSnapshot: applySnapshot,
       onActivity: applyActivity,
       onTerminal: applyTerminal,
+      onScreen: applyScreen,
       onSession: applySession,
       onThread: applyThread,
       onStatus: setStatus,
@@ -344,15 +378,24 @@ export function createStore() {
     return per ? per.get(refSeq) : undefined;
   }
 
+  // Latest raw tmux pane frame for a session, or null. Shape: the Screen $def
+  // ({seq,ts,session_id,thread_id,data,cols,rows}); views read {seq,data,cols,rows}.
+  function screenForSession(sessionId) {
+    return state.screens.get(sessionId) || null;
+  }
+
   return {
     // wiring / apply
     connectClient, applyHello, applySnapshot, applyActivity, applyTerminal,
-    applySession, applyThread, setStatus, noteGap, noteResync,
+    applyScreen, applySession, applyThread, setStatus, noteGap, noteResync,
     // subscription
     subscribe, getState: () => state,
+    // the client.js instance (set by connectClient). Views resolve it as a plain
+    // property; ide.js also tolerates a function form, so expose both shapes.
+    get client() { return boundClient; },
     // selectors
     threadsList, sessionsForThread, sessionsList, activitiesForSession,
-    terminalForSession, terminalForActivity,
+    terminalForSession, terminalForActivity, screenForSession,
     session: (id) => state.sessions.get(id),
     thread: (id) => state.threads.get(id),
     activity: (seq) => state.activityBySeq.get(seq),
