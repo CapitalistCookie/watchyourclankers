@@ -314,7 +314,7 @@
 .wyc-follow-chip.on { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
 .wyc-follow-chip:hover { background: var(--accent-amber); border-color: var(--accent-amber); }
 
-/* fallback (CDN failed): a highlighted <pre> instead of CodeMirror. This path is
+/* fallback (vendored bundle failed to load): a highlighted <pre> instead of CodeMirror. This path is
  * what renders HEADLESS, so follow-lines (#1) MUST work here: each source line is
  * its own .efline block (so offsetTop is meaningful for scroll-to + the flash is a
  * per-line block). The <pre> itself is the scroll container ide.js scrolls. */

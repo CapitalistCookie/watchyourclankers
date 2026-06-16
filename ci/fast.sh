@@ -373,8 +373,14 @@ if command -v node >/dev/null 2>&1 && curl -s -o /dev/null --max-time 2 "http://
     | grep -qi "cache-control: no-cache" \
     || fail "served static assets lost 'Cache-Control: no-cache' (stale-UI regression — server.py nocache_middleware)"
   note "  static assets carry no-cache (no stale-UI regression)"
+  # CM on-box (Spec 004): the vendored bundle must import + mount + reveal char-by-
+  # char headless. Skips clean if no daemon (ci/full.sh runs it then); a real broken
+  # bundle / missing export / snap-instead-of-type BLOCKS the push.
+  note "  running CM on-box smoke vs live :8900"
+  node ci/cm_smoke.mjs 8900 || fail "CM on-box smoke FAILED — vendored bundle did not import/mount/reveal"
+  note "  CM on-box smoke passed"
 else
-  note "  (no live daemon on :8900 — DOM probe deferred to ci/full.sh)"
+  note "  (no live daemon on :8900 — DOM + CM probes deferred to ci/full.sh)"
 fi
 
 # --- all green --------------------------------------------------------------

@@ -24,9 +24,10 @@
  * STORE (web/store.js) is the only state seam. We subscribe ONCE and update only
  * the surface that changed — no full DOM rebuild per tick (Principle VII).
  *
- * STACK: vanilla JS ES module, NO build step. CodeMirror 6 is dynamically
- * imported from esm.sh (pinned) with a graceful highlighted-<pre> fallback so the
- * editor is never blank if the CDN is unreachable. The editor is read-only.
+ * STACK: vanilla JS ES module, no runtime build. CodeMirror 6 is dynamically
+ * imported from our OWN /static (a one-time esbuild vendoring — Spec 004), with a
+ * graceful highlighted-<pre> fallback so the editor is never blank if the bundle
+ * fails to load. The editor is read-only.
  *
  * PUBLIC API (W3 mosaic composes this):
  *   import mountIdePane from './ide.js';
@@ -40,37 +41,30 @@
  *   GET /file?path=<abs>&token=<t> -> {path,content,lines,redacted,truncated}
  */
 
-/* ============================================================ CodeMirror CDN
- * Pinned CodeMirror 6 ESM from esm.sh. `?bundle` collapses each package's own
- * dependency graph into one module (no import waterfall); we pin the shared
- * sub-deps via `external` so state/view aren't duplicated across packages.
- * If ANY of these dynamic imports rejects (offline / CDN down) we fall back to a
- * highlighted <pre>; the pane is never blank. */
-const CM_VER = '6.0.1';                 // @codemirror/state + view meta versions
-const CM_LANG_VER = '6.10.8';           // @codemirror/language
-const CM_THEME_VER = '6.1.2';           // @codemirror/theme-one-dark
-const ESM = 'https://esm.sh';
-// Keep the shared core singletons un-bundled so every package shares one copy.
-const SHARED = 'external=@codemirror/state,@codemirror/view,@codemirror/language,@lezer/highlight,@lezer/common';
-const cmUrl = (pkg, ver) => `${ESM}/${pkg}@${ver}?bundle&${SHARED}`;
+/* ===================================================== CodeMirror (vendored)
+ * CodeMirror 6 is loaded from our OWN /static — a one-time esbuild VENDORING of
+ * the npm packages into web/vendor/codemirror.bundle.js (Spec 004). This box
+ * can't reach esm.sh, so the old CDN path was untestable here + always fell back;
+ * the vendored bundle loads from disk so CM runs ON-BOX. The single dynamic
+ * import is cached by the browser, so the per-language factories below reuse it
+ * for free. If the bundle import rejects (defence in depth) we fall back to a
+ * highlighted <pre>; the pane is never blank. NOT a runtime build (Principle VII):
+ * the browser loads a committed static file. Rebuild: `cd build/codemirror &&
+ * npm ci && npm run build`. */
+const CM_BUNDLE = '/static/vendor/codemirror.bundle.js';
 
-const CM_IMPORTS = {
-  state:   `${ESM}/@codemirror/state@${CM_VER}`,
-  view:    `${ESM}/@codemirror/view@${CM_VER}`,
-  language:`${ESM}/@codemirror/language@${CM_LANG_VER}`,
-  oneDark: `${ESM}/@codemirror/theme-one-dark@${CM_THEME_VER}`,
-};
-// Language packages, lazily imported per file-extension (pinned majors).
+// Language extensions, lazily chosen per file-extension. Each reuses the single
+// cached bundle import; the factory args match the prior esm.sh behavior exactly.
 const CM_LANGS = {
-  javascript: () => import(cmUrl('@codemirror/lang-javascript', '6.2.4')).then((m) => m.javascript({ jsx: true, typescript: false })),
-  typescript: () => import(cmUrl('@codemirror/lang-javascript', '6.2.4')).then((m) => m.javascript({ jsx: true, typescript: true })),
-  python:     () => import(cmUrl('@codemirror/lang-python', '6.2.1')).then((m) => m.python()),
-  css:        () => import(cmUrl('@codemirror/lang-css', '6.3.1')).then((m) => m.css()),
-  html:       () => import(cmUrl('@codemirror/lang-html', '6.4.9')).then((m) => m.html()),
-  json:       () => import(cmUrl('@codemirror/lang-json', '6.0.2')).then((m) => m.json()),
-  markdown:   () => import(cmUrl('@codemirror/lang-markdown', '6.3.2')).then((m) => m.markdown()),
-  rust:       () => import(cmUrl('@codemirror/lang-rust', '6.0.1')).then((m) => m.rust()),
-  yaml:       () => import(cmUrl('@codemirror/lang-yaml', '6.1.2')).then((m) => m.yaml()),
+  javascript: () => import(CM_BUNDLE).then((m) => m.javascript({ jsx: true, typescript: false })),
+  typescript: () => import(CM_BUNDLE).then((m) => m.javascript({ jsx: true, typescript: true })),
+  python:     () => import(CM_BUNDLE).then((m) => m.python()),
+  css:        () => import(CM_BUNDLE).then((m) => m.css()),
+  html:       () => import(CM_BUNDLE).then((m) => m.html()),
+  json:       () => import(CM_BUNDLE).then((m) => m.json()),
+  markdown:   () => import(CM_BUNDLE).then((m) => m.markdown()),
+  rust:       () => import(CM_BUNDLE).then((m) => m.rust()),
+  yaml:       () => import(CM_BUNDLE).then((m) => m.yaml()),
 };
 
 // extension -> language key
@@ -87,7 +81,7 @@ const EXT_LANG = {
 };
 
 /* ============================================================ hljs fallback HL
- * The <pre> fallback (used when the CodeMirror CDN is blocked) is highlighted
+ * The <pre> fallback (used if the vendored CodeMirror bundle fails to load) is highlighted
  * with the VENDORED highlight.js — it loads from our own /static so it ALWAYS
  * works offline. We inject the UMD bundle + theme once, lazily, on first
  * fallback render, and cache a ready Promise. Degrades to plain text on failure.
@@ -830,17 +824,15 @@ export function mountIdePane(mountEl, store, opts = {}) {
     if (cmLoading) return null;
     cmLoading = true;
     try {
-      const [stateMod, viewMod, langMod, themeMod] = await Promise.all([
-        import(CM_IMPORTS.state),
-        import(CM_IMPORTS.view),
-        import(CM_IMPORTS.language),
-        import(CM_IMPORTS.oneDark).catch(() => ({ oneDark: [] })), // theme optional
-      ]);
+      // ONE dynamic import of the vendored bundle (browser-cached; the CM_LANGS
+      // factories reuse it). It re-exports every symbol the old 4 esm.sh imports
+      // provided, so the destructures below are unchanged.
+      const mod = await import(CM_BUNDLE);
       if (destroyed) { cmLoading = false; return null; }
-      const { EditorState, Compartment } = stateMod;
-      const { EditorView, lineNumbers, highlightActiveLine, drawSelection } = viewMod;
-      const { syntaxHighlighting, defaultHighlightStyle, foldGutter, bracketMatching } = langMod;
-      const oneDark = themeMod.oneDark || [];
+      const { EditorState, Compartment } = mod;
+      const { EditorView, lineNumbers, highlightActiveLine, drawSelection } = mod;
+      const { syntaxHighlighting, defaultHighlightStyle, foldGutter, bracketMatching } = mod;
+      const oneDark = mod.oneDark || [];
       const langCompartment = new Compartment();
       const baseExts = [
         lineNumbers(),
@@ -866,7 +858,7 @@ export function mountIdePane(mountEl, store, opts = {}) {
       cmLoading = false;
       return cm;
     } catch (e) {
-      console.warn('[ide] CodeMirror CDN load failed; using <pre> fallback', e);
+      console.warn('[ide] CodeMirror vendored bundle load failed; using <pre> fallback', e);
       cmFailed = true;
       cmLoading = false;
       return null;

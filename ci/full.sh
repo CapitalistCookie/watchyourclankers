@@ -33,6 +33,8 @@ if command -v node >/dev/null 2>&1; then
   node ci/render_smoke.mjs "$PORT"
   echo "[ci-full] DOM-interaction probe (real pointer drag asserts gridTemplateRows changes) on :$PORT"
   node ci/interaction.mjs "$PORT"
+  echo "[ci-full] CM on-box smoke (vendored bundle imports + mounts + reveals char-by-char) on :$PORT"
+  node ci/cm_smoke.mjs "$PORT"
   kill -9 "$DPID" 2>/dev/null || true
   trap - EXIT
 else
